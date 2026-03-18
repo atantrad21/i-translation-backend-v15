@@ -1,0 +1,11 @@
+flask==2.3.0
+flask-cors==4.0.0
+tensorflow==2.16.1
+requests==2.31.0
+gunicorn==21.2.0
+h5py==3.10.0
+pillow==10.2.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+gdown==5.1.0
+pydicom==2.4.4
