@@ -231,14 +231,14 @@ def convert_image():
         input_tensor = preprocess_image(image_bytes, filename, conversion_type)
         
         # Determine generators
+       # Determine generators
         predictions = {}
         if conversion_type == 'ct_to_mri':
             predictions['G'] = generators['G'](input_tensor, training=False)
-            predictions['I'] = generators['I'](input_tensor, training=False)
+            predictions['J'] = generators['J'](input_tensor, training=False)
         else:
             predictions['F'] = generators['F'](input_tensor, training=False)
-            predictions['J'] = generators['J'](input_tensor, training=False)
-        
+            predictions['I'] = generators['I'](input_tensor, training=False)
         # Postprocess
         results = {}
         for gen_name, pred_tensor in predictions.items():
