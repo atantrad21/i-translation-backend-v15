@@ -78,53 +78,57 @@ def load_models():
 
 load_models()
 
-def preprocess_image(image_bytes, filename):
+# === THE SMART IMAGE PROCESSOR ===
+def preprocess_image(image_bytes, filename, target_shape):
+    # Extract exactly what the AI expects (e.g. 64x64x3 or 64x64x1)
+    _, target_h, target_w, target_c = target_shape
+    
     if filename.endswith('.dcm'):
-        # 1a. Read the DICOM file directly from bytes
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array
-        
-        # DICOM files have intense 16-bit brightness. Normalize down to standard 8-bit.
         img = img - np.min(img)
         if np.max(img) != 0:
             img = (img / np.max(img) * 255.0).astype(np.uint8)
         else:
             img = img.astype(np.uint8)
     else:
-        # 1b. Read standard PNG/JPG files
         np_img = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
+        # Read the upload in Color by default
+        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-    # 2. Resize to exactly what the AI expects (64x64)
-    img = cv2.resize(img, (64, 64))
+    # Match the AI's required color channels perfectly
+    if len(img.shape) == 2: # If image is Grayscale
+        if target_c == 3:   # But AI wants Color
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    elif len(img.shape) == 3: # If image is Color
+        if target_c == 1:     # But AI wants Grayscale
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            
+    # Resize to AI's required dimensions
+    img = cv2.resize(img, (target_w, target_h))
+    img = (img / 127.5) - 1.0 # Normalize
     
-    # 3. Normalize pixel values to [-1, 1]
-    img = (img / 127.5) - 1.0 
-    
-    # 4. Add the channel and batch dimensions: (1, 64, 64, 1)
-    img = np.expand_dims(img, axis=-1) 
-    img = np.expand_dims(img, axis=0)  
+    if target_c == 1 and len(img.shape) == 2:
+        img = np.expand_dims(img, axis=-1) 
+        
+    img = np.expand_dims(img, axis=0) # Add batch dimension
     return img
 
 def postprocess_tensor(tensor):
-    # 1. Extract the image from the AI's output batch (now 64x64x1)
     img = tensor[0].numpy()
-    
-    # 2. Denormalize pixel values back to [0, 255]
     img = (img + 1.0) * 127.5 
     img = np.clip(img, 0, 255).astype(np.uint8)
     
-    # 3. Drop the single channel dimension so OpenCV can process it as a flat image
+    # Scale back up to 512x512 High Res
     if len(img.shape) == 3 and img.shape[2] == 1:
         img = np.squeeze(img, axis=-1)
+        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         
-    # 4. Magically upscale the 64x64 output to High-Res 512x512 using Cubic Interpolation
-    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
-    
-    # 5. Convert back to standard BGR so the web browser can read it perfectly
-    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    
-    # 6. Encode and send back to frontend
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
 
@@ -137,19 +141,20 @@ def convert():
     file = request.files['image']
     
     try:
-        input_tensor = preprocess_image(file.read(), file.filename.lower())
+        # Determine which model we are using
+        model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
+        model = generators[model_key]
         
-        # Route perfectly to the winning models
-        if conversion_type == 'ct_to_mri':
-            result_tensor = generators['G'](input_tensor, training=False)
-            return jsonify({'image_G': postprocess_tensor(result_tensor)})
-            
-        elif conversion_type == 'mri_to_ct':
-            result_tensor = generators['F'](input_tensor, training=False)
-            return jsonify({'image_F': postprocess_tensor(result_tensor)})
-            
-        else:
-            return jsonify({'error': 'Invalid conversion type'}), 400
+        # Dynamically fetch what shape this specific model wants!
+        expected_shape = model.input_shape
+        
+        # Preprocess the image to perfectly match the model
+        input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
+        
+        # Run translation
+        result_tensor = model(input_tensor, training=False)
+        
+        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
