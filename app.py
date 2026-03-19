@@ -47,14 +47,14 @@ class InstanceNormalization(tf.keras.layers.Layer):
         config.update({'axis': self.axis, 'epsilon': self.epsilon, 'center': self.center, 'scale': self.scale})
         return config
 
+
 # ==========================================
 # V16 CHAMPION MODELS ONLY (F & G)
 # ==========================================
 MODEL_LINKS = {
-    'F': '1NTBlkD3MQPfjoAN2rRoySoaCNqsTkELZ', # MRI to CT Champion
-    'G': '15YPfERDoVbTWHPzzAn54OKpRVpvFOyRe'  # CT to MRI Champion
+    'F': '1NTBlkD3MQPfjoAN2rRoySoaCNqsTkELZ',  # MRI to CT Champion
+    'G': '15YPfERDoVbTWHPzzAn54OKpRVpvFOyRe'   # CT to MRI Champion
 }
-
 generators = {}
 
 def load_models():
@@ -67,33 +67,35 @@ def load_models():
             print(f"Downloading Generator {name}...")
             url = f"https://drive.google.com/uc?id={file_id}"
             gdown.download(url, model_path, quiet=False)
-        
+
         print(f"Loading Generator {name} into memory...")
         generators[name] = tf.keras.models.load_model(
-            model_path, 
-            compile=False, 
+            model_path,
+            compile=False,
             custom_objects={'InstanceNormalization': InstanceNormalization}
         )
         print(f"✓ Generator {name} LOADED!")
 
 load_models()
 
+
 # === THE SMART IMAGE PROCESSOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
+    # 1. SAFELY EXTRACT SHAPE (Force standard Python integers to prevent OpenCV C++ errors)
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
         target_shape = expected_shape
         
-    target_h = target_shape[1] or 256
-    target_w = target_shape[2] or 256
-    target_c = target_shape[3] or 3
+    target_h = int(target_shape[1]) if target_shape[1] is not None else 256
+    target_w = int(target_shape[2]) if target_shape[2] is not None else 256
+    target_c = int(target_shape[3]) if target_shape[3] is not None else 3
 
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
-        # --- 1. HANDLE 3D SCANS (GRAB THE MIDDLE SLICE) ---
+        # --- HANDLE 3D SCANS (GRAB THE MIDDLE SLICE) ---
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
             mid_index = img.shape[0] // 2
             img = img[mid_index]
@@ -101,12 +103,11 @@ def preprocess_image(image_bytes, filename, expected_shape):
             mid_index = img.shape[1] // 2
             img = img[0, mid_index]
 
-        # --- 2. FIX INVERTED COLORS ---
+        # --- FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = np.max(img) - img
 
-        # --- 3. STANDARD LINEAR NORMALIZATION (GAN-Safe) ---
-        # Replaces the aggressive percentile clipping with safe min-max scaling
+        # --- STANDARD LINEAR NORMALIZATION (GAN-Safe) ---
         img_min = np.min(img)
         img_max = np.max(img)
         if img_max - img_min > 0:
@@ -116,11 +117,9 @@ def preprocess_image(image_bytes, filename, expected_shape):
         
         img = img.astype(np.uint8)
 
-        # Match AI Color Channels before resizing
+        # Match AI Color Channels (Keep as 2D for now if Grayscale)
         if target_c == 3:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif target_c == 1:
-            img = np.expand_dims(img, axis=-1)
 
     else:
         # --- HANDLE STANDARD PNG/JPG UPLOADS ---
@@ -131,21 +130,23 @@ def preprocess_image(image_bytes, filename, expected_shape):
         
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        # Match AI Color Channels
+        # Match AI Color Channels (Keep as 2D for now if Grayscale)
         if target_c == 1:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            img = np.expand_dims(img, axis=-1)
 
-    # --- 4. HIGH-QUALITY RESIZE & NORMALIZE TO [-1, 1] ---
-    # INTER_AREA is technically superior for downsampling large raw scans to 256x256
+    # --- 2. HIGH-QUALITY RESIZE ---
+    # OpenCV safely resizes the pure (H,W) or (H,W,3) array here without crashing
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
     
-    # cv2.resize drops the channel dimension if target_c == 1, so we add it back
+    # --- 3. EXPAND DIMS & NORMALIZE TO [-1, 1] ---
+    # Now we safely add the channel dimension back if the model expects 1 channel
     if target_c == 1 and len(img.shape) == 2:
         img = np.expand_dims(img, axis=-1)
 
     # Scale strictly to [-1.0, 1.0]
     img = (img.astype(np.float32) / 127.5) - 1.0
+    
+    # Add the batch dimension: (1, H, W, C)
     img = img.reshape((1, target_h, target_w, target_c))
     
     return img
@@ -177,25 +178,27 @@ def postprocess_tensor(tensor):
 
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
+
+
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'image' not in request.files:
         return jsonify({'error': 'No image provided'}), 400
-    
+
     conversion_type = request.form.get('type')
     file = request.files['image']
-    
+
     try:
         model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
         model = generators[model_key]
-        
+
         expected_shape = model.input_shape
         input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
-        
+
         result_tensor = model(input_tensor, training=False)
-        
+
         return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
-            
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
