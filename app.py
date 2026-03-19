@@ -3,6 +3,7 @@ import io
 import base64
 import gdown
 import pydicom
+from pydicom.pixel_data_handlers.util import apply_voi_lut
 import tensorflow as tf
 import numpy as np
 import cv2
@@ -79,8 +80,8 @@ def load_models():
 load_models()
 
 # === THE BULLETPROOF IMAGE PROCESSOR ===
+# === THE BULLETPROOF IMAGE PROCESSOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
-    # 1. Safely parse the exact shape the AI wants
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
@@ -90,26 +91,28 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_w = target_shape[2] or 256
     target_c = target_shape[3] or 3
 
-    # 2. Read the image (DICOM or Standard)
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
-        img = dicom.pixel_array.astype(float)
         
-        # Apply CT Rescale values if they exist in the medical file
-        if hasattr(dicom, 'RescaleIntercept') and hasattr(dicom, 'RescaleSlope'):
-            img = img * float(dicom.RescaleSlope) + float(dicom.RescaleIntercept)
+        # 1. Apply the exact medical contrast/brightness saved in the file
+        try:
+            img = apply_voi_lut(dicom.pixel_array, dicom)
+        except:
+            img = dicom.pixel_array
             
-        # ROBUST NORMALIZATION (Auto-Windowing)
-        # This chops off the top 2% and bottom 2% of extreme pixels, revealing the brain tissue!
-        p_low, p_high = np.percentile(img, (2, 98))
-        img = np.clip(img, p_low, p_high)
+        img = img.astype(float)
         
-        if p_high - p_low > 0:
-            img = (img - p_low) / (p_high - p_low) * 255.0
+        # 2. Fix Inverted Colors! (If white is black, flip it back)
+        if hasattr(dicom, 'PhotometricInterpretation') and dicom.PhotometricInterpretation == 'MONOCHROME1':
+            img = np.max(img) - img
+            
+        # 3. Squeeze safely into a standard 8-bit image format (0-255)
+        img = img - np.min(img)
+        if np.max(img) > 0:
+            img = (img / np.max(img) * 255.0).astype(np.uint8)
         else:
-            img = np.zeros_like(img)
+            img = img.astype(np.uint8)
             
-        img = img.astype(np.uint8)
     else:
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
@@ -119,11 +122,9 @@ def preprocess_image(image_bytes, filename, expected_shape):
     if img is None:
         raise ValueError("Could not read image data.")
 
-    # 3. Handle 3D DICOMs (Extract first slice)
     if len(img.shape) == 3 and img.shape[0] < 10: 
         img = np.transpose(img, (1, 2, 0))
 
-    # 4. Standardize Color Channels based on what the AI wants
     if len(img.shape) == 2:
         if target_c == 3:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
@@ -132,18 +133,13 @@ def preprocess_image(image_bytes, filename, expected_shape):
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
         elif img.shape[2] == 3 and target_c == 1:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        elif img.shape[2] == 4: # Drop Alpha channel
+        elif img.shape[2] == 4: 
             img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
             if target_c == 1:
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # 5. Resize to AI dimensions
     img = cv2.resize(img, (target_w, target_h))
-
-    # 6. Normalize pixel values
-    img = (img / 127.5) - 1.0
-
-    # 7. BULLETPROOF RESHAPE
+    img = (img / 127.5) - 1.0 
     img = img.reshape((1, target_h, target_w, target_c))
     
     return img
