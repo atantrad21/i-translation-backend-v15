@@ -6,6 +6,7 @@ import pydicom
 import tensorflow as tf
 import numpy as np
 import cv2
+import imageio.v2 as imageio # Required for matching the training PNG contrast
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -79,16 +80,11 @@ def load_models():
 load_models()
 
 
-# === STRICT 1-CHANNEL GRAYSCALE PROCESSOR ===
-import imageio.v2 as imageio # Add this to your imports at the top!
-
-# === STRICT 1-CHANNEL GRAYSCALE PROCESSOR (IMAGEIO MATCH) ===
-# === HYBRID PROCESSOR (PYDICOM SAFETY + IMAGEIO MATH) ===
-# === HYBRID PROCESSOR (STRICT 217x181 GEOMETRY) ===
+# ==========================================
 # === THE STRICT 64x64 TRANSLATOR ===
+# ==========================================
 def preprocess_image(image_bytes, filename, expected_shape):
     # 1. OBEY THE MODEL'S BAKED-IN SHAPE (64x64)
-    # We ignore the 217x181 because the model physically cannot process it
     target_h = 64
     target_w = 64
 
@@ -128,7 +124,6 @@ def preprocess_image(image_bytes, filename, expected_shape):
             raise ValueError("Could not read image data.")
 
     # --- 2. SQUASH TO 64x64 ---
-    # INTER_AREA is the best algorithm for heavily downscaling an image
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     # --- 3. NORMALIZE TO [-1, 1] & FORMAT FOR KERAS ---
@@ -138,56 +133,49 @@ def preprocess_image(image_bytes, filename, expected_shape):
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
+
+
+# ==========================================
+# === SMART UPSCALER (BAND-AID SUPER RESOLUTION) ===
+# ==========================================
 def postprocess_tensor(tensor):
     if hasattr(tensor, 'numpy'):
         img = tensor[0].numpy()
     else:
         img = tensor[0]
         
-    # Denormalize from [-1.0, 1.0] to [0, 255]
+    # --- 1. DENORMALIZE FROM AI TENSOR ---
     img = (img + 1.0) * 127.5
     img = np.clip(img, 0, 255).astype(np.uint8)
 
-    # --- HIGH-QUALITY UPSCALING ---
-    # INTER_CUBIC is best for upscaling from 256x256 to 512x512
+    # Convert strictly to 2D Grayscale array
     if len(img.shape) == 3 and img.shape[2] == 1:
         img = np.squeeze(img, axis=-1)
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) # BGR for cv2 encoding
-    else:
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    elif len(img.shape) == 3 and img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # --- GAN ARTIFACT REDUCTION ---
-    # A subtle bilateral filter smooths out artificial pixel noise while keeping edges (like the skull/tissues) sharp
+    # --- 2. HIGH-FIDELITY UPSCALING ---
+    # Lanczos4 is mathematically far superior to Cubic when stretching tiny 64x64 images
+    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+
+    # --- 3. UNSHARP MASKING (Fakes Super-Resolution) ---
+    # This specifically detects blurry edges and artificially sharpens them
+    gaussian_blur = cv2.GaussianBlur(img, (0, 0), 2.0)
+    img = cv2.addWeighted(img, 1.5, gaussian_blur, -0.5, 0)
+
+    # --- 4. GAN ARTIFACT REDUCTION ---
+    # Smooths out the tiny "checkerboard" static left behind by the CycleGAN
     img = cv2.bilateralFilter(img, d=5, sigmaColor=25, sigmaSpace=25)
+
+    # Convert back to BGR so the web browser can read the colors properly
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
 
 
+# ==========================================
+# FLASK ROUTING
+# ==========================================
 @app.route('/convert', methods=['POST'])
 def convert():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
-
-    conversion_type = request.form.get('type')
-    file = request.files['image']
-
-    try:
-        model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
-        model = generators[model_key]
-
-        expected_shape = model.input_shape
-        input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
-
-        result_tensor = model(input_tensor, training=False)
-
-        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 7860))
-    app.run(host='0.0.0.0', port=port)
