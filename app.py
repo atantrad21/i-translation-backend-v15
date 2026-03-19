@@ -93,12 +93,11 @@ def preprocess_image(image_bytes, filename, expected_shape):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(float)
         
-        # 1. Fix Inverted Colors! (If white is black, flip it back)
+        # 1. Fix Inverted Colors
         if hasattr(dicom, 'PhotometricInterpretation') and dicom.PhotometricInterpretation == 'MONOCHROME1':
             img = np.max(img) - img
             
-        # 2. 100% PURE MIN-MAX NORMALIZATION
-        # This perfectly mimics how standard PNGs are generated from DICOMs
+        # 2. Min-Max Normalization
         img_min = np.min(img)
         img_max = np.max(img)
         if img_max - img_min > 0:
@@ -107,7 +106,23 @@ def preprocess_image(image_bytes, filename, expected_shape):
             img = np.zeros_like(img)
             
         img = img.astype(np.uint8)
+
+        # ==========================================================
+        # 3. USER SUGGESTION: FORCE CONVERT TO 217x181 PNG IN MEMORY
+        # ==========================================================
+        # Resize to your custom dimensions
+        img = cv2.resize(img, (217, 181))
+        
+        # Encode as a literal PNG file in the server's RAM
+        _, png_buffer = cv2.imencode('.png', img)
+        
+        # Decode it back perfectly, exactly like a standard user upload
+        img = cv2.imdecode(png_buffer, cv2.IMREAD_COLOR)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # ==========================================================
+
     else:
+        # Standard PNG/JPG uploads
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
         if img is not None:
@@ -116,9 +131,7 @@ def preprocess_image(image_bytes, filename, expected_shape):
     if img is None:
         raise ValueError("Could not read image data.")
 
-    if len(img.shape) == 3 and img.shape[0] < 10: 
-        img = np.transpose(img, (1, 2, 0))
-
+    # Convert Channels based on AI Needs
     if len(img.shape) == 2:
         if target_c == 3:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
@@ -132,6 +145,7 @@ def preprocess_image(image_bytes, filename, expected_shape):
             if target_c == 1:
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
+    # Final resize to AI model shape & Normalize to [-1, 1]
     img = cv2.resize(img, (target_w, target_h))
     img = (img / 127.5) - 1.0 
     img = img.reshape((1, target_h, target_w, target_c))
