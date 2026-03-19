@@ -81,7 +81,6 @@ load_models()
 
 # === STRICT 1-CHANNEL GRAYSCALE PROCESSOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
-    # 1. EXTRACT SHAPE (Fallback to 64x64 if model doesn't specify)
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
@@ -94,46 +93,57 @@ def preprocess_image(image_bytes, filename, expected_shape):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
-        # --- HANDLE 3D SCANS (GRAB THE MIDDLE SLICE) ---
+        # --- HANDLE 3D SCANS ---
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
-            mid_index = img.shape[0] // 2
-            img = img[mid_index]
+            img = img[img.shape[0] // 2]
         elif len(img.shape) == 4:
-            mid_index = img.shape[1] // 2
-            img = img[0, mid_index]
+            img = img[0, img.shape[1] // 2]
 
-        # --- FORCE TO GRAYSCALE IF DICOM HAS COLOR CHANNELS ---
         if len(img.shape) == 3:
-            img = np.mean(img, axis=-1)  
+            img = np.mean(img, axis=-1)
+
+        # --- THE FIX: APPLY HOUNSFIELD UNIT RESCALING ---
+        # This converts raw scanner electrical values into actual visual density
+        intercept = getattr(dicom, 'RescaleIntercept', 0)
+        slope = getattr(dicom, 'RescaleSlope', 1)
+        img = (img * slope) + intercept
+
+        # --- SMART WINDOWING (Brain/Soft Tissue Focus) ---
+        # Instead of generic percentiles, we window to standard medical values (-100 to +300 HU usually captures soft tissue and bone nicely)
+        # If it's an MRI (which doesn't use standard HU), this safely falls back to a smart percentile.
+        if slope != 1 or intercept != 0: 
+            # It's likely a CT
+            img = np.clip(img, -100, 400)
+        else:
+            # It's likely an MRI
+            p_low, p_high = np.percentile(img, (2, 98))
+            img = np.clip(img, p_low, p_high)
 
         # --- FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = np.max(img) - img
 
-        # --- THE FIX: SMART DICOM WINDOWING ---
-        # We must clip the extreme air/bone values so the tissue contrast matches your PNGs
-        p_low, p_high = np.percentile(img, (1, 99))
-        img = np.clip(img, p_low, p_high)
-
-        # --- STANDARD LINEAR NORMALIZATION ---
-        if p_high - p_low > 0:
-            img = (img - p_low) / (p_high - p_low) * 255.0
+        # --- STANDARD LINEAR NORMALIZATION TO 0-255 ---
+        img_min = np.min(img)
+        img_max = np.max(img)
+        if img_max - img_min > 0:
+            img = (img - img_min) / (img_max - img_min) * 255.0
         else:
             img = np.zeros_like(img)
         
         img = img.astype(np.uint8)
 
     else:
-        # --- HANDLE STANDARD PNG/JPG STRICLY AS GRAYSCALE ---
+        # --- PNG/JPG HANDLING ---
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError("Could not read image data.")
 
-    # --- 2. HIGH-QUALITY RESIZE ---
+    # --- HIGH-QUALITY RESIZE ---
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-    # --- 3. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
+    # --- NORMALIZE TO [-1, 1] & FORCE SHAPE ---
     img = (img.astype(np.float32) / 127.5) - 1.0
     img = img.reshape((1, target_h, target_w, 1))
     
