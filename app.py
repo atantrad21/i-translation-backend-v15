@@ -86,6 +86,9 @@ load_models()
 # ==========================================
 # === THE STRICT 64x64 TRANSLATOR ===
 # ==========================================
+# ==========================================
+# === THE STRICT 64x64 TRANSLATOR ===
+# ==========================================
 def preprocess_image(image_bytes, filename, expected_shape):
     # 1. OBEY THE MODEL'S BAKED-IN SHAPE (64x64)
     target_h = 64
@@ -105,11 +108,14 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-        # Emulate the 8-bit image scaling
-        img_min = np.min(img)
-        img_max = np.max(img)
-        if img_max - img_min > 0:
-            img = (img - img_min) / (img_max - img_min) * 255.0
+        # --- THE MISSING FIX: PERCENTILE CLIPPING ---
+        # This cuts out scanner artifacts and forces the DICOM 
+        # to have the exact same clean contrast as your PNGs!
+        p_low, p_high = np.percentile(img, (1.0, 99.0))
+        img = np.clip(img, p_low, p_high)
+
+        if p_high - p_low > 0:
+            img = (img - p_low) / (p_high - p_low) * 255.0
         else:
             img = np.zeros_like(img)
         
@@ -120,7 +126,7 @@ def preprocess_image(image_bytes, filename, expected_shape):
         img = cv2.imdecode(encoded_png, cv2.IMREAD_GRAYSCALE)
 
     else:
-        # --- REGULAR PNG/JPG UPLOADS ---
+        # --- REGULAR PNG/JPG UPLOADS (These work perfectly!) ---
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
@@ -131,8 +137,6 @@ def preprocess_image(image_bytes, filename, expected_shape):
 
     # --- 3. NORMALIZE TO [-1, 1] & FORMAT FOR KERAS ---
     img = (img.astype(np.float32) / 127.5) - 1.0
-    
-    # Safely reshape to (1, 64, 64, 1) so functional_563 accepts it perfectly
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
