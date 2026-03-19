@@ -84,23 +84,20 @@ import imageio.v2 as imageio # Add this to your imports at the top!
 
 # === STRICT 1-CHANNEL GRAYSCALE PROCESSOR (IMAGEIO MATCH) ===
 # === HYBRID PROCESSOR (PYDICOM SAFETY + IMAGEIO MATH) ===
+# === HYBRID PROCESSOR (STRICT 217x181 GEOMETRY) ===
 def preprocess_image(image_bytes, filename, expected_shape):
-    if isinstance(expected_shape, list):
-        target_shape = expected_shape[0]
-    else:
-        target_shape = expected_shape
-        
-    # Safe fallback to 256x256
-    target_h = int(target_shape[1]) if target_shape[1] is not None else 256
-    target_w = int(target_shape[2]) if target_shape[2] is not None else 256
+    
+    # --- YOUR CUSTOM TRAINING GEOMETRY ---
+    # If the image looks "squashed" horizontally, swap these two numbers!
+    target_h = 217 
+    target_w = 181 
 
     if filename.endswith('.dcm'):
-        # --- 1. PYDICOM SAFETY ---
-        # Bypasses the 156826 padding crash completely
+        # 1. PYDICOM SAFETY (Bypasses the 156826 padding crash)
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
-        # Handle 3D scans (grab the middle slice)
+        # Handle 3D scans (grab middle slice)
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
             img = img[img.shape[0] // 2]
         elif len(img.shape) == 4:
@@ -109,19 +106,19 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-        # --- 2. IMAGEIO MATH (Match Training PNGs) ---
-        # Mimic imageio's exact internal scaling to prevent GAN noise
-        img_min = np.min(img)
-        img_max = np.max(img)
-        if img_max - img_min > 0:
-            img = (img - img_min) / (img_max - img_min) * 255.0
+        # 2. IMAGEIO MATH (Match Training Contrast)
+        p_low, p_high = np.percentile(img, (0.1, 99.9)) # Safely ignore bright artifacts
+        img = np.clip(img, p_low, p_high)
+
+        if p_high - p_low > 0:
+            img = (img - p_low) / (p_high - p_low) * 255.0
         else:
             img = np.zeros_like(img)
         
         img = img.astype(np.uint8)
 
     else:
-        # --- REGULAR PNG/JPG UPLOADS ---
+        # REGULAR PNG/JPG UPLOADS
         temp_path = f"/tmp/temp_upload_{filename}"
         with open(temp_path, "wb") as f:
             f.write(image_bytes)
@@ -136,13 +133,12 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-    # --- 3. HIGH-QUALITY RESIZE ---
+    # --- 3. STRICT GEOMETRY RESIZE ---
+    # We forcefully resize to your specific training dimensions
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     # --- 4. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
     img = (img.astype(np.float32) / 127.5) - 1.0
-    
-    # Strictly enforce 1-channel dimension to prevent shape errors
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
