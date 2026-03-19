@@ -85,19 +85,19 @@ import imageio.v2 as imageio # Add this to your imports at the top!
 # === STRICT 1-CHANNEL GRAYSCALE PROCESSOR (IMAGEIO MATCH) ===
 # === HYBRID PROCESSOR (PYDICOM SAFETY + IMAGEIO MATH) ===
 # === HYBRID PROCESSOR (STRICT 217x181 GEOMETRY) ===
+# === THE STRICT 64x64 TRANSLATOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
-    
-    # --- YOUR CUSTOM TRAINING GEOMETRY ---
-    # If the image looks "squashed" horizontally, swap these two numbers!
-    target_h = 217 
-    target_w = 181 
+    # 1. OBEY THE MODEL'S BAKED-IN SHAPE (64x64)
+    # We ignore the 217x181 because the model physically cannot process it
+    target_h = 64
+    target_w = 64
 
     if filename.endswith('.dcm'):
-        # 1. PYDICOM SAFETY (Bypasses the 156826 padding crash)
+        # --- THE PNG SIMULATION ---
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
-        # Handle 3D scans (grab middle slice)
+        # Handle 3D scans
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
             img = img[img.shape[0] // 2]
         elif len(img.shape) == 4:
@@ -106,39 +106,35 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-        # 2. IMAGEIO MATH (Match Training Contrast)
-        p_low, p_high = np.percentile(img, (0.1, 99.9)) # Safely ignore bright artifacts
-        img = np.clip(img, p_low, p_high)
-
-        if p_high - p_low > 0:
-            img = (img - p_low) / (p_high - p_low) * 255.0
+        # Emulate the 8-bit image scaling
+        img_min = np.min(img)
+        img_max = np.max(img)
+        if img_max - img_min > 0:
+            img = (img - img_min) / (img_max - img_min) * 255.0
         else:
             img = np.zeros_like(img)
         
         img = img.astype(np.uint8)
+        
+        # Bake the 8-bit PNG compression artifacts into the array
+        _, encoded_png = cv2.imencode('.png', img)
+        img = cv2.imdecode(encoded_png, cv2.IMREAD_GRAYSCALE)
 
     else:
-        # REGULAR PNG/JPG UPLOADS
-        temp_path = f"/tmp/temp_upload_{filename}"
-        with open(temp_path, "wb") as f:
-            f.write(image_bytes)
+        # --- REGULAR PNG/JPG UPLOADS ---
+        np_img = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError("Could not read image data.")
 
-        try:
-            img = imageio.imread(temp_path)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-                
-        img = np.array(img).astype(np.float32)
-        if len(img.shape) == 3:
-            img = np.mean(img, axis=-1)
-
-    # --- 3. STRICT GEOMETRY RESIZE ---
-    # We forcefully resize to your specific training dimensions
+    # --- 2. SQUASH TO 64x64 ---
+    # INTER_AREA is the best algorithm for heavily downscaling an image
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-    # --- 4. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
+    # --- 3. NORMALIZE TO [-1, 1] & FORMAT FOR KERAS ---
     img = (img.astype(np.float32) / 127.5) - 1.0
+    
+    # Safely reshape to (1, 64, 64, 1) so functional_563 accepts it perfectly
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
