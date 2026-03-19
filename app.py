@@ -56,9 +56,14 @@ class InstanceNormalization(tf.keras.layers.Layer):
 # HIGH-RES STABLE CHAMPION MODELS
 # ==========================================
 MODEL_LINKS = {
-    'F': '1NIS0WGqboMmydauANCRVOXSuC3Jpm13p',  # NEW MRI to CT @ 1000 Epochs
-    'G': '1ym6za3pWPuyBr_hOMaWkWO8rrgIXhHKz'   # NEW CT to MRI @ 1000 Epochs
+    'F': '1Ca-n8d9BrCImL8SP4j9Y3ojP9jXIVVfz',  # MRI to CT @ 250 Epochs (Goldilocks Zone)
+    'G': '1FKiLH1TG9rXNmQFC1MacHbc2X8KZJSg2'   # CT to MRI @ 250 Epochs (Goldilocks Zone)
 }
+
+generators = {} # <--- Keep this safe!
+
+def load_models():
+    print("======================================================================")
 
 generators = {} # <--- Keep this safe!
 
