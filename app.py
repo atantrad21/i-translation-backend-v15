@@ -92,79 +92,64 @@ def preprocess_image(image_bytes, filename, expected_shape):
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
-        
+
         # --- 1. HANDLE 3D SCANS (GRAB THE MIDDLE SLICE) ---
-        if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]: 
-            # Grab the middle slice so the AI sees the thickest part of the brain
+        if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
             mid_index = img.shape[0] // 2
             img = img[mid_index]
         elif len(img.shape) == 4:
             mid_index = img.shape[1] // 2
             img = img[0, mid_index]
 
-        # --- 2. SMART AUTO-WINDOWING (IGNORE BLACK BACKGROUND) ---
-        # We only measure pixels that are brighter than the background
-        valid_pixels = img[img > np.min(img)]
-        if len(valid_pixels) > 0:
-            p_low, p_high = np.percentile(valid_pixels, (1, 99))
-        else:
-            p_low, p_high = np.percentile(img, (1, 99))
-            
-        img = np.clip(img, p_low, p_high)
+        # --- 2. FIX INVERTED COLORS ---
+        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
+            img = np.max(img) - img
 
-        # --- 3. NORMALIZE TO 0-255 ---
+        # --- 3. STANDARD LINEAR NORMALIZATION (GAN-Safe) ---
+        # Replaces the aggressive percentile clipping with safe min-max scaling
         img_min = np.min(img)
         img_max = np.max(img)
         if img_max - img_min > 0:
             img = (img - img_min) / (img_max - img_min) * 255.0
         else:
             img = np.zeros_like(img)
-            
+        
         img = img.astype(np.uint8)
 
-      # --- 4. FIX INVERTED COLORS ---
-        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
-            img = 255 - img
-            
-        # --- 5. ENHANCE CONTRAST (Mimic PNG output) ---
-        img = img.astype(np.uint8)
-        
-        # 🚨 NEW SAFETY NET: If the DICOM is already in color (3 channels), flatten it to grayscale first!
-        if len(img.shape) == 3 and img.shape[2] in [3, 4]:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        elif len(img.shape) == 3 and img.shape[2] == 1:
-            img = np.squeeze(img, axis=-1)
-            
-        # This guarantees the brain structures pop perfectly for the AI
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        img = clahe.apply(img)
-            
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        # Match AI Color Channels before resizing
+        if target_c == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif target_c == 1:
+            img = np.expand_dims(img, axis=-1)
+
     else:
-        # Standard PNG/JPG uploads
+        # --- HANDLE STANDARD PNG/JPG UPLOADS ---
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-        if img is not None:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if img is None:
+            raise ValueError("Could not read image data.")
+        
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Match AI Color Channels
+        if target_c == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            img = np.expand_dims(img, axis=-1)
 
-    if img is None:
-        raise ValueError("Could not read image data.")
-
-    # Match AI Color Channels
-    if target_c == 1 and len(img.shape) == 3 and img.shape[2] == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # --- 4. HIGH-QUALITY RESIZE & NORMALIZE TO [-1, 1] ---
+    # INTER_AREA is technically superior for downsampling large raw scans to 256x256
+    img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    
+    # cv2.resize drops the channel dimension if target_c == 1, so we add it back
+    if target_c == 1 and len(img.shape) == 2:
         img = np.expand_dims(img, axis=-1)
-    elif target_c == 3 and len(img.shape) == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    elif target_c == 1 and len(img.shape) == 2:
-        img = np.expand_dims(img, axis=-1)
 
-    # Final resize & Normalization to [-1, 1]
-    img = cv2.resize(img, (target_w, target_h))
-    img = (img / 127.5) - 1.0 
+    # Scale strictly to [-1.0, 1.0]
+    img = (img.astype(np.float32) / 127.5) - 1.0
     img = img.reshape((1, target_h, target_w, target_c))
     
     return img
+
 
 def postprocess_tensor(tensor):
     if hasattr(tensor, 'numpy'):
@@ -172,20 +157,26 @@ def postprocess_tensor(tensor):
     else:
         img = tensor[0]
         
-    img = (img + 1.0) * 127.5 
+    # Denormalize from [-1.0, 1.0] to [0, 255]
+    img = (img + 1.0) * 127.5
     img = np.clip(img, 0, 255).astype(np.uint8)
-    
+
+    # --- HIGH-QUALITY UPSCALING ---
+    # INTER_CUBIC is best for upscaling from 256x256 to 512x512
     if len(img.shape) == 3 and img.shape[2] == 1:
         img = np.squeeze(img, axis=-1)
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) # BGR for cv2 encoding
     else:
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
+        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        
+
+    # --- GAN ARTIFACT REDUCTION ---
+    # A subtle bilateral filter smooths out artificial pixel noise while keeping edges (like the skull/tissues) sharp
+    img = cv2.bilateralFilter(img, d=5, sigmaColor=25, sigmaSpace=25)
+
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
-
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'image' not in request.files:
