@@ -80,6 +80,9 @@ load_models()
 
 
 # === STRICT 1-CHANNEL GRAYSCALE PROCESSOR ===
+import imageio.v2 as imageio # Add this to your imports at the top!
+
+# === STRICT 1-CHANNEL GRAYSCALE PROCESSOR (IMAGEIO MATCH) ===
 def preprocess_image(image_bytes, filename, expected_shape):
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
@@ -89,56 +92,40 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_h = int(target_shape[1]) if target_shape[1] is not None else 64
     target_w = int(target_shape[2]) if target_shape[2] is not None else 64
 
-    if filename.endswith('.dcm'):
-        dicom = pydicom.dcmread(io.BytesIO(image_bytes))
-        img = dicom.pixel_array.astype(np.float32)
+    # --- READ USING IMAGEIO TO MATCH YOUR TRAINING DATA EXACTLY ---
+    # We write the bytes to a temporary file because imageio handles DICOMs best from file paths
+    temp_path = f"/tmp/temp_upload_{filename}"
+    with open(temp_path, "wb") as f:
+        f.write(image_bytes)
 
-        # --- HANDLE 3D SCANS ---
-        if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
-            img = img[img.shape[0] // 2]
-        elif len(img.shape) == 4:
-            img = img[0, img.shape[1] // 2]
+    try:
+        # imageio will automatically handle the raw reading in the exact same way it did for your training script
+        img = imageio.imread(temp_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-        if len(img.shape) == 3:
-            img = np.mean(img, axis=-1)
+    img = np.array(img).astype(np.float32)
 
-        # --- THE FIX: APPLY HOUNSFIELD UNIT RESCALING ---
-        # This converts raw scanner electrical values into actual visual density
-        intercept = getattr(dicom, 'RescaleIntercept', 0)
-        slope = getattr(dicom, 'RescaleSlope', 1)
-        img = (img * slope) + intercept
+    # --- HANDLE 3D SCANS ---
+    if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
+        img = img[img.shape[0] // 2]
+    elif len(img.shape) == 4:
+        img = img[0, img.shape[1] // 2]
 
-        # --- SMART WINDOWING (Brain/Soft Tissue Focus) ---
-        # Instead of generic percentiles, we window to standard medical values (-100 to +300 HU usually captures soft tissue and bone nicely)
-        # If it's an MRI (which doesn't use standard HU), this safely falls back to a smart percentile.
-        if slope != 1 or intercept != 0: 
-            # It's likely a CT
-            img = np.clip(img, -100, 400)
-        else:
-            # It's likely an MRI
-            p_low, p_high = np.percentile(img, (2, 98))
-            img = np.clip(img, p_low, p_high)
+    if len(img.shape) == 3:
+        img = np.mean(img, axis=-1)
 
-        # --- FIX INVERTED COLORS ---
-        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
-            img = np.max(img) - img
-
-        # --- STANDARD LINEAR NORMALIZATION TO 0-255 ---
-        img_min = np.min(img)
-        img_max = np.max(img)
-        if img_max - img_min > 0:
-            img = (img - img_min) / (img_max - img_min) * 255.0
-        else:
-            img = np.zeros_like(img)
-        
-        img = img.astype(np.uint8)
-
+    # --- IMAGEIO'S NATIVE SCALING ---
+    # When imageio converts to PNG, it usually scales the min/max of the raw array to 0-255.
+    img_min = np.min(img)
+    img_max = np.max(img)
+    if img_max - img_min > 0:
+        img = (img - img_min) / (img_max - img_min) * 255.0
     else:
-        # --- PNG/JPG HANDLING ---
-        np_img = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise ValueError("Could not read image data.")
+        img = np.zeros_like(img)
+    
+    img = img.astype(np.uint8)
 
     # --- HIGH-QUALITY RESIZE ---
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
