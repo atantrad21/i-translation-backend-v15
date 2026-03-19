@@ -177,5 +177,31 @@ def postprocess_tensor(tensor):
 # ==========================================
 # FLASK ROUTING
 # ==========================================
+# ==========================================
+# FLASK ROUTING
+# ==========================================
 @app.route('/convert', methods=['POST'])
 def convert():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+
+    conversion_type = request.form.get('type')
+    file = request.files['image']
+
+    try:
+        model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
+        model = generators[model_key]
+
+        expected_shape = model.input_shape
+        input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
+
+        result_tensor = model(input_tensor, training=False)
+
+        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 7860))
+    app.run(host='0.0.0.0', port=port)
