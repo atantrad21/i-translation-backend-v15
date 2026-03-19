@@ -78,41 +78,74 @@ def load_models():
 
 load_models()
 
-# === THE SMART IMAGE PROCESSOR ===
-def preprocess_image(image_bytes, filename, target_shape):
-    # Extract exactly what the AI expects (e.g. 64x64x3 or 64x64x1)
-    _, target_h, target_w, target_c = target_shape
-    
+# === THE BULLETPROOF IMAGE PROCESSOR ===
+def preprocess_image(image_bytes, filename, expected_shape):
+    # 1. Safely parse the exact shape the AI wants
+    if isinstance(expected_shape, list):
+        target_shape = expected_shape[0]
+    else:
+        target_shape = expected_shape
+        
+    target_h = target_shape[1] or 256
+    target_w = target_shape[2] or 256
+    target_c = target_shape[3] or 3
+
+    # 2. Read the image (DICOM or Standard)
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
-        img = dicom.pixel_array
-        img = img - np.min(img)
-        if np.max(img) != 0:
-            img = (img / np.max(img) * 255.0).astype(np.uint8)
+        img = dicom.pixel_array.astype(float)
+        
+        # Apply CT Rescale values if they exist in the medical file
+        if hasattr(dicom, 'RescaleIntercept') and hasattr(dicom, 'RescaleSlope'):
+            img = img * float(dicom.RescaleSlope) + float(dicom.RescaleIntercept)
+            
+        # ROBUST NORMALIZATION (Auto-Windowing)
+        # This chops off the top 2% and bottom 2% of extreme pixels, revealing the brain tissue!
+        p_low, p_high = np.percentile(img, (2, 98))
+        img = np.clip(img, p_low, p_high)
+        
+        if p_high - p_low > 0:
+            img = (img - p_low) / (p_high - p_low) * 255.0
         else:
-            img = img.astype(np.uint8)
+            img = np.zeros_like(img)
+            
+        img = img.astype(np.uint8)
     else:
         np_img = np.frombuffer(image_bytes, np.uint8)
-        # Read the upload in Color by default
         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-    # Match the AI's required color channels perfectly
-    if len(img.shape) == 2: # If image is Grayscale
-        if target_c == 3:   # But AI wants Color
+        if img is not None:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    if img is None:
+        raise ValueError("Could not read image data.")
+
+    # 3. Handle 3D DICOMs (Extract first slice)
+    if len(img.shape) == 3 and img.shape[0] < 10: 
+        img = np.transpose(img, (1, 2, 0))
+
+    # 4. Standardize Color Channels based on what the AI wants
+    if len(img.shape) == 2:
+        if target_c == 3:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    elif len(img.shape) == 3: # If image is Color
-        if target_c == 1:     # But AI wants Grayscale
+    elif len(img.shape) == 3:
+        if img.shape[2] == 1 and target_c == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif img.shape[2] == 3 and target_c == 1:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            
-    # Resize to AI's required dimensions
+        elif img.shape[2] == 4: # Drop Alpha channel
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+            if target_c == 1:
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    # 5. Resize to AI dimensions
     img = cv2.resize(img, (target_w, target_h))
-    img = (img / 127.5) - 1.0 # Normalize
+
+    # 6. Normalize pixel values
+    img = (img / 127.5) - 1.0
+
+    # 7. BULLETPROOF RESHAPE
+    img = img.reshape((1, target_h, target_w, target_c))
     
-    if target_c == 1 and len(img.shape) == 2:
-        img = np.expand_dims(img, axis=-1) 
-        
-    img = np.expand_dims(img, axis=0) # Add batch dimension
     return img
 
 def postprocess_tensor(tensor):
@@ -141,14 +174,11 @@ def convert():
     file = request.files['image']
     
     try:
-        # Determine which model we are using
         model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
         model = generators[model_key]
         
-        # Dynamically fetch what shape this specific model wants!
+        # Dynamically fetch what shape this specific model wants
         expected_shape = model.input_shape
-        
-        # Preprocess the image to perfectly match the model
         input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
         
         # Run translation
