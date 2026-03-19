@@ -93,11 +93,31 @@ def preprocess_image(image_bytes, filename, expected_shape):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(float)
         
-        # 1. Fix Inverted Colors
-        if hasattr(dicom, 'PhotometricInterpretation') and dicom.PhotometricInterpretation == 'MONOCHROME1':
-            img = np.max(img) - img
-            
-        # 2. Min-Max Normalization
+        # 1. CT Scan Rescale (Hounsfield Units)
+        intercept = getattr(dicom, 'RescaleIntercept', 0)
+        slope = getattr(dicom, 'RescaleSlope', 1)
+        img = img * float(slope) + float(intercept)
+
+        # 2. Extract Radiologist Windowing (This fixes the noise!)
+        window_center = getattr(dicom, 'WindowCenter', None)
+        window_width = getattr(dicom, 'WindowWidth', None)
+
+        if window_center is not None and window_width is not None:
+            # Handle cases where multiple windows are provided
+            if type(window_center) == pydicom.multival.MultiValue:
+                window_center = window_center[0]
+            if type(window_width) == pydicom.multival.MultiValue:
+                window_width = window_width[0]
+
+            img_min = float(window_center) - float(window_width) / 2.0
+            img_max = float(window_center) + float(window_width) / 2.0
+            img = np.clip(img, img_min, img_max)
+        else:
+            # Fallback robust crop if no window is baked in
+            p_low, p_high = np.percentile(img, (2, 98))
+            img = np.clip(img, p_low, p_high)
+
+        # 3. Normalize perfectly to 0-255
         img_min = np.min(img)
         img_max = np.max(img)
         if img_max - img_min > 0:
@@ -107,19 +127,12 @@ def preprocess_image(image_bytes, filename, expected_shape):
             
         img = img.astype(np.uint8)
 
-        # ==========================================================
-        # 3. USER SUGGESTION: FORCE CONVERT TO 217x181 PNG IN MEMORY
-        # ==========================================================
-        # Resize to your custom dimensions
-        img = cv2.resize(img, (217, 181))
-        
-        # Encode as a literal PNG file in the server's RAM
-        _, png_buffer = cv2.imencode('.png', img)
-        
-        # Decode it back perfectly, exactly like a standard user upload
-        img = cv2.imdecode(png_buffer, cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # ==========================================================
+        # 4. Fix Inverted Colors
+        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
+            img = 255 - img
+            
+        # Convert to color so OpenCV can standardize it
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
     else:
         # Standard PNG/JPG uploads
@@ -131,21 +144,14 @@ def preprocess_image(image_bytes, filename, expected_shape):
     if img is None:
         raise ValueError("Could not read image data.")
 
-    # Convert Channels based on AI Needs
-    if len(img.shape) == 2:
-        if target_c == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    elif len(img.shape) == 3:
-        if img.shape[2] == 1 and target_c == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif img.shape[2] == 3 and target_c == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        elif img.shape[2] == 4: 
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-            if target_c == 1:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # Match AI Color Channels
+    if target_c == 1 and img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        img = np.expand_dims(img, axis=-1)
+    elif target_c == 3 and len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
-    # Final resize to AI model shape & Normalize to [-1, 1]
+    # Final resize & Normalization to [-1, 1]
     img = cv2.resize(img, (target_w, target_h))
     img = (img / 127.5) - 1.0 
     img = img.reshape((1, target_h, target_w, target_c))
