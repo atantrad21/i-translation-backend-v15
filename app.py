@@ -122,17 +122,19 @@ def preprocess_image(image_bytes, filename, expected_shape):
             
         img = img.astype(np.uint8)
 
-        # --- 4. FIX INVERTED COLORS ---
+       # --- 4. FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = 255 - img
             
         # --- 5. ENHANCE CONTRAST (Mimic PNG output) ---
+        # Force the image strictly back to 8-bit so OpenCV doesn't crash!
+        img = img.astype(np.uint8)
+        
         # This guarantees the brain structures pop perfectly for the AI
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         img = clahe.apply(img)
             
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
     else:
         # Standard PNG/JPG uploads
         np_img = np.frombuffer(image_bytes, np.uint8)
