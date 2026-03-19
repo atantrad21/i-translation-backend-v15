@@ -83,59 +83,69 @@ load_models()
 import imageio.v2 as imageio # Add this to your imports at the top!
 
 # === STRICT 1-CHANNEL GRAYSCALE PROCESSOR (IMAGEIO MATCH) ===
+# === HYBRID PROCESSOR (PYDICOM SAFETY + IMAGEIO MATH) ===
 def preprocess_image(image_bytes, filename, expected_shape):
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
         target_shape = expected_shape
         
-    target_h = int(target_shape[1]) if target_shape[1] is not None else 64
-    target_w = int(target_shape[2]) if target_shape[2] is not None else 64
+    # Safe fallback to 256x256
+    target_h = int(target_shape[1]) if target_shape[1] is not None else 256
+    target_w = int(target_shape[2]) if target_shape[2] is not None else 256
 
-    # --- READ USING IMAGEIO TO MATCH YOUR TRAINING DATA EXACTLY ---
-    # We write the bytes to a temporary file because imageio handles DICOMs best from file paths
-    temp_path = f"/tmp/temp_upload_{filename}"
-    with open(temp_path, "wb") as f:
-        f.write(image_bytes)
+    if filename.endswith('.dcm'):
+        # --- 1. PYDICOM SAFETY ---
+        # Bypasses the 156826 padding crash completely
+        dicom = pydicom.dcmread(io.BytesIO(image_bytes))
+        img = dicom.pixel_array.astype(np.float32)
 
-    try:
-        # imageio will automatically handle the raw reading in the exact same way it did for your training script
-        img = imageio.imread(temp_path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        # Handle 3D scans (grab the middle slice)
+        if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
+            img = img[img.shape[0] // 2]
+        elif len(img.shape) == 4:
+            img = img[0, img.shape[1] // 2]
 
-    img = np.array(img).astype(np.float32)
+        if len(img.shape) == 3:
+            img = np.mean(img, axis=-1)
 
-    # --- HANDLE 3D SCANS ---
-    if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
-        img = img[img.shape[0] // 2]
-    elif len(img.shape) == 4:
-        img = img[0, img.shape[1] // 2]
+        # --- 2. IMAGEIO MATH (Match Training PNGs) ---
+        # Mimic imageio's exact internal scaling to prevent GAN noise
+        img_min = np.min(img)
+        img_max = np.max(img)
+        if img_max - img_min > 0:
+            img = (img - img_min) / (img_max - img_min) * 255.0
+        else:
+            img = np.zeros_like(img)
+        
+        img = img.astype(np.uint8)
 
-    if len(img.shape) == 3:
-        img = np.mean(img, axis=-1)
-
-    # --- IMAGEIO'S NATIVE SCALING ---
-    # When imageio converts to PNG, it usually scales the min/max of the raw array to 0-255.
-    img_min = np.min(img)
-    img_max = np.max(img)
-    if img_max - img_min > 0:
-        img = (img - img_min) / (img_max - img_min) * 255.0
     else:
-        img = np.zeros_like(img)
-    
-    img = img.astype(np.uint8)
+        # --- REGULAR PNG/JPG UPLOADS ---
+        temp_path = f"/tmp/temp_upload_{filename}"
+        with open(temp_path, "wb") as f:
+            f.write(image_bytes)
 
-    # --- HIGH-QUALITY RESIZE ---
+        try:
+            img = imageio.imread(temp_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+        img = np.array(img).astype(np.float32)
+        if len(img.shape) == 3:
+            img = np.mean(img, axis=-1)
+
+    # --- 3. HIGH-QUALITY RESIZE ---
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-    # --- NORMALIZE TO [-1, 1] & FORCE SHAPE ---
+    # --- 4. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
     img = (img.astype(np.float32) / 127.5) - 1.0
+    
+    # Strictly enforce 1-channel dimension to prevent shape errors
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
-
 def postprocess_tensor(tensor):
     if hasattr(tensor, 'numpy'):
         img = tensor[0].numpy()
