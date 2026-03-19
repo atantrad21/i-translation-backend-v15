@@ -89,15 +89,29 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_w = target_shape[2] or 256
     target_c = target_shape[3] or 3
 
-    if filename.endswith('.dcm'):
+   if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
-        img = dicom.pixel_array.astype(float)
+        # 1. Read as a 32-bit float to completely avoid integer underflow
+        img = dicom.pixel_array.astype(np.float32)
         
-        # --- NEW SAFETY NET: Handle 3D / Stacked DICOMs early ---
+        # --- Handle 3D Stacked DICOMs early ---
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]: 
-            img = img[0] # Grab the first slice if it's a deep medical stack
+            img = img[0] 
         elif len(img.shape) == 4:
             img = img[0]
+
+        # 2. Let OpenCV safely squash the image perfectly into 0-255 bounds
+        img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+        # 3. Fix Inverted Colors
+        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
+            img = 255 - img
+            
+        # 4. Standardize to 3 color channels
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif len(img.shape) == 3 and img.shape[2] == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
 
         # 1. CT Scan Rescale (Hounsfield Units)
         intercept = getattr(dicom, 'RescaleIntercept', 0)
