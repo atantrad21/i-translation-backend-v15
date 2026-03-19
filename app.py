@@ -175,13 +175,16 @@ def convert():
         input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
         
         # ========================================================
-        # 🚨 VISUAL DIAGNOSTIC BYPASS 🚨
-        # We are skipping the AI to see exactly what it is seeing!
-        # result_tensor = model(input_tensor, training=False)
+        # 🚀 THE AI ENGINE IS BACK ONLINE!
         # ========================================================
+        # We pass the image into the CycleGAN model for translation
+        result_tensor = model(input_tensor, training=False)
         
-        # We return the input_tensor directly to the website
-        return jsonify({f'image_{model_key}': postprocess_tensor(input_tensor)})
+        # Make sure we send the newly translated 'result_tensor' back to the frontend!
+        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
