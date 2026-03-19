@@ -9,7 +9,7 @@ import pydicom.uid
 import tensorflow as tf
 import numpy as np
 import cv2
-import imageio.v2 as imageio # Required for matching the training PNG contrast
+import imageio.v2 as imageio 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -53,20 +53,20 @@ class InstanceNormalization(tf.keras.layers.Layer):
 
 
 # ==========================================
-# V16 CHAMPION MODELS ONLY (F & G)
+# HIGH-RES 256x256 CHAMPION MODELS
 # ==========================================
 MODEL_LINKS = {
-    'F': '1NTBlkD3MQPfjoAN2rRoySoaCNqsTkELZ',  # MRI to CT Champion
-    'G': '15YPfERDoVbTWHPzzAn54OKpRVpvFOyRe'   # CT to MRI Champion
+    'F': '15nBy4fB21tlYbosGCX2cI4kpEEEpAAde',  # MRI to CT Champion
+    'G': '1GREjMnRHil5BCn1_S9IIZVEylsaxEtug'   # CT to MRI Champion
 }
 generators = {}
 
 def load_models():
     print("======================================================================")
-    print("LOADING V16 CHAMPION GENERATORS (F & G)")
+    print("LOADING HIGH-RES 256x256 GENERATORS (F & G)")
     print("======================================================================")
     for name, file_id in MODEL_LINKS.items():
-        model_path = f"/tmp/generator_{name.lower()}.h5"
+        model_path = f"/tmp/generator_highres_{name.lower()}.h5"
         if not os.path.exists(model_path):
             print(f"Downloading Generator {name}...")
             url = f"https://drive.google.com/uc?id={file_id}"
@@ -84,22 +84,18 @@ load_models()
 
 
 # ==========================================
-# === THE STRICT 64x64 TRANSLATOR ===
-# ==========================================
-# ==========================================
-# === THE STRICT 64x64 TRANSLATOR ===
+# === TRUE HIGH-DEFINITION TRANSLATOR ===
 # ==========================================
 def preprocess_image(image_bytes, filename, expected_shape):
-    # 1. OBEY THE MODEL'S BAKED-IN SHAPE (64x64)
-    target_h = 64
-    target_w = 64
+    # 1. OBEY THE NEW HIGH-RES SHAPE (256x256)
+    target_h = 256
+    target_w = 256
 
     if filename.endswith('.dcm'):
         # --- THE PNG SIMULATION ---
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
-        # Handle 3D scans
         if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]:
             img = img[img.shape[0] // 2]
         elif len(img.shape) == 4:
@@ -108,9 +104,7 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-        # --- THE MISSING FIX: PERCENTILE CLIPPING ---
-        # This cuts out scanner artifacts and forces the DICOM 
-        # to have the exact same clean contrast as your PNGs!
+        # --- PERCENTILE CLIPPING FIX ---
         p_low, p_high = np.percentile(img, (1.0, 99.0))
         img = np.clip(img, p_low, p_high)
 
@@ -121,18 +115,17 @@ def preprocess_image(image_bytes, filename, expected_shape):
         
         img = img.astype(np.uint8)
         
-        # Bake the 8-bit PNG compression artifacts into the array
         _, encoded_png = cv2.imencode('.png', img)
         img = cv2.imdecode(encoded_png, cv2.IMREAD_GRAYSCALE)
 
     else:
-        # --- REGULAR PNG/JPG UPLOADS (These work perfectly!) ---
+        # --- REGULAR PNG/JPG UPLOADS ---
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError("Could not read image data.")
 
-    # --- 2. SQUASH TO 64x64 ---
+    # --- 2. RESIZE TO 256x256 ---
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     # --- 3. NORMALIZE TO [-1, 1] & FORMAT FOR KERAS ---
@@ -145,8 +138,8 @@ def preprocess_image(image_bytes, filename, expected_shape):
 # ==========================================
 # === POST-PROCESSING & FILE GENERATION ===
 # ==========================================
-def get_sharpened_grayscale(tensor):
-    """Takes the raw AI tensor and applies the Band-Aid upscaling to a crisp 512x512."""
+def postprocess_tensor(tensor):
+    """Cleanly processes the true 256x256 AI output without artificial blurring."""
     if hasattr(tensor, 'numpy'):
         img = tensor[0].numpy()
     else:
@@ -162,31 +155,26 @@ def get_sharpened_grayscale(tensor):
     elif len(img.shape) == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Upscale and Sharpen
-    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LANCZOS4)
-    gaussian_blur = cv2.GaussianBlur(img, (0, 0), 2.0)
-    img = cv2.addWeighted(img, 1.5, gaussian_blur, -0.5, 0)
-    img = cv2.bilateralFilter(img, d=5, sigmaColor=25, sigmaSpace=25)
+    # Soft resize to 512x512 strictly for UI viewing consistency (No more fake sharpening!)
+    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
+    
     return img
 
 def convert_to_png_base64(gray_img):
-    """Converts the grayscale array to a PNG for the website UI."""
     bgr_img = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2BGR)
     _, buffer = cv2.imencode('.png', bgr_img)
     return base64.b64encode(buffer).decode('utf-8')
 
 def convert_to_dicom_base64(gray_img, modality):
-    """Packages the grayscale array into a strict, valid DICOM file."""
     file_meta = FileMetaDataset()
-    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2') # CT/MRI Storage
+    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2') 
     file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
     
-    # Inject standard medical metadata
     ds.PatientName = "AI^Generated^Patient"
-    ds.PatientID = "ITRANS-V16"
+    ds.PatientID = "ITRANS-HIGHRES"
     ds.Modality = modality.upper()
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
     ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
@@ -196,7 +184,6 @@ def convert_to_dicom_base64(gray_img, modality):
     ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
     ds.SecondaryCaptureDeviceManufacturer = "I-Translation AI"
 
-    # Image specs (8-bit grayscale)
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.PixelRepresentation = 0
@@ -206,7 +193,6 @@ def convert_to_dicom_base64(gray_img, modality):
     ds.Rows, ds.Columns = gray_img.shape
     ds.PixelData = gray_img.tobytes()
 
-    # Save to memory and encode
     with io.BytesIO() as buffer:
         ds.save_as(buffer, write_like_original=False)
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
@@ -230,18 +216,14 @@ def convert():
         expected_shape = model.input_shape
         input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
 
-        # Get the AI translation
         result_tensor = model(input_tensor, training=False)
 
-        # Process the image once
-        sharpened_image = get_sharpened_grayscale(result_tensor)
-        
-        # Generate both file formats!
+        final_image = postprocess_tensor(result_tensor)
         modality_string = "MR" if model_key == 'G' else "CT"
         
         return jsonify({
-            f'image_{model_key}': convert_to_png_base64(sharpened_image),
-            f'dicom_{model_key}': convert_to_dicom_base64(sharpened_image, modality_string)
+            f'image_{model_key}': convert_to_png_base64(final_image),
+            f'dicom_{model_key}': convert_to_dicom_base64(final_image, modality_string)
         })
 
     except Exception as e:
