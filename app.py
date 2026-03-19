@@ -78,20 +78,42 @@ def load_models():
 load_models()
 
 def preprocess_image(image_bytes):
+    # 1. Read the image
     np_img = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (256, 256))
-    img = (img / 127.5) - 1.0 # Normalize to [-1, 1]
-    img = np.expand_dims(img, axis=0)
+    
+    # 2. Decode exactly as Grayscale (1 channel) instead of Color
+    img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
+    
+    # 3. Resize to exactly what the AI expects (64x64)
+    img = cv2.resize(img, (64, 64))
+    
+    # 4. Normalize pixel values to [-1, 1]
+    img = (img / 127.5) - 1.0 
+    
+    # 5. Add the channel dimension (64, 64, 1) and batch dimension (1, 64, 64, 1)
+    img = np.expand_dims(img, axis=-1) 
+    img = np.expand_dims(img, axis=0)  
     return img
 
 def postprocess_tensor(tensor):
+    # 1. Extract the image from the AI's output batch (now 64x64x1)
     img = tensor[0].numpy()
-    img = (img + 1.0) * 127.5 # Denormalize
+    
+    # 2. Denormalize pixel values back to [0, 255]
+    img = (img + 1.0) * 127.5 
     img = np.clip(img, 0, 255).astype(np.uint8)
-    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) # High-Res 512x512
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    
+    # 3. Drop the single channel dimension so OpenCV can process it as a flat image
+    if len(img.shape) == 3 and img.shape[2] == 1:
+        img = np.squeeze(img, axis=-1)
+        
+    # 4. Magically upscale the 64x64 output to High-Res 512x512 using Cubic Interpolation
+    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
+    
+    # 5. Convert back to standard BGR so the web browser can read it perfectly
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    
+    # 6. Encode and send back to frontend
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
 
