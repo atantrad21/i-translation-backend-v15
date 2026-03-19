@@ -59,6 +59,11 @@ MODEL_LINKS = {
     'F': '17_lOEatsMyGW8sbGS7bagQrsSD7n3ovE',  # NEW MRI to CT @ 550 Epochs
     'G': '1MdTVeIGK8b6P7mfgXUxZnN-uXYgsibgO'   # NEW CT to MRI @ 550 Epochs
 }
+
+generators = {} # <--- Add this exact line back right here!
+
+def load_models():
+    print("======================================================================")
 def load_models():
     print("======================================================================")
     print("LOADING STABLE HIGH-RES GENERATORS (F & G)")
