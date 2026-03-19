@@ -80,8 +80,8 @@ def load_models():
 load_models()
 
 # === THE BULLETPROOF IMAGE PROCESSOR ===
-# === THE BULLETPROOF IMAGE PROCESSOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
+    # 1. Safely parse the exact shape the AI wants
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
@@ -91,10 +91,11 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_w = target_shape[2] or 256
     target_c = target_shape[3] or 3
 
+    # 2. Read the image (DICOM or Standard)
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         
-        # 1. Apply the exact medical contrast/brightness saved in the file
+        # Apply the exact medical contrast/brightness saved in the file
         try:
             img = apply_voi_lut(dicom.pixel_array, dicom)
         except:
@@ -102,89 +103,4 @@ def preprocess_image(image_bytes, filename, expected_shape):
             
         img = img.astype(float)
         
-        # 2. Fix Inverted Colors! (If white is black, flip it back)
-        if hasattr(dicom, 'PhotometricInterpretation') and dicom.PhotometricInterpretation == 'MONOCHROME1':
-            img = np.max(img) - img
-            
-        # 3. Squeeze safely into a standard 8-bit image format (0-255)
-        img = img - np.min(img)
-        if np.max(img) > 0:
-            img = (img / np.max(img) * 255.0).astype(np.uint8)
-        else:
-            img = img.astype(np.uint8)
-            
-    else:
-        np_img = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-        if img is not None:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    if img is None:
-        raise ValueError("Could not read image data.")
-
-    if len(img.shape) == 3 and img.shape[0] < 10: 
-        img = np.transpose(img, (1, 2, 0))
-
-    if len(img.shape) == 2:
-        if target_c == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-    elif len(img.shape) == 3:
-        if img.shape[2] == 1 and target_c == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif img.shape[2] == 3 and target_c == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        elif img.shape[2] == 4: 
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-            if target_c == 1:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-    img = cv2.resize(img, (target_w, target_h))
-    img = (img / 127.5) - 1.0 
-    img = img.reshape((1, target_h, target_w, target_c))
-    
-    return img
-
-def postprocess_tensor(tensor):
-    img = tensor[0].numpy()
-    img = (img + 1.0) * 127.5 
-    img = np.clip(img, 0, 255).astype(np.uint8)
-    
-    # Scale back up to 512x512 High Res
-    if len(img.shape) == 3 and img.shape[2] == 1:
-        img = np.squeeze(img, axis=-1)
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    else:
-        img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC) 
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        
-    _, buffer = cv2.imencode('.png', img)
-    return base64.b64encode(buffer).decode('utf-8')
-
-@app.route('/convert', methods=['POST'])
-def convert():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
-    
-    conversion_type = request.form.get('type')
-    file = request.files['image']
-    
-    try:
-        model_key = 'G' if conversion_type == 'ct_to_mri' else 'F'
-        model = generators[model_key]
-        
-        # Dynamically fetch what shape this specific model wants
-        expected_shape = model.input_shape
-        input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
-        
-        # Run translation
-        result_tensor = model(input_tensor, training=False)
-        
-        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 7860))
-    app.run(host='0.0.0.0', port=port)
+        # Fix Inverted
