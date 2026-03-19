@@ -93,17 +93,22 @@ def preprocess_image(image_bytes, filename, expected_shape):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(float)
         
+        # --- NEW SAFETY NET: Handle 3D / Stacked DICOMs early ---
+        if len(img.shape) == 3 and img.shape[2] not in [1, 3, 4]: 
+            img = img[0] # Grab the first slice if it's a deep medical stack
+        elif len(img.shape) == 4:
+            img = img[0]
+
         # 1. CT Scan Rescale (Hounsfield Units)
         intercept = getattr(dicom, 'RescaleIntercept', 0)
         slope = getattr(dicom, 'RescaleSlope', 1)
         img = img * float(slope) + float(intercept)
 
-        # 2. Extract Radiologist Windowing (This fixes the noise!)
+        # 2. Extract Radiologist Windowing
         window_center = getattr(dicom, 'WindowCenter', None)
         window_width = getattr(dicom, 'WindowWidth', None)
 
         if window_center is not None and window_width is not None:
-            # Handle cases where multiple windows are provided
             if type(window_center) == pydicom.multival.MultiValue:
                 window_center = window_center[0]
             if type(window_width) == pydicom.multival.MultiValue:
@@ -113,7 +118,6 @@ def preprocess_image(image_bytes, filename, expected_shape):
             img_max = float(window_center) + float(window_width) / 2.0
             img = np.clip(img, img_min, img_max)
         else:
-            # Fallback robust crop if no window is baked in
             p_low, p_high = np.percentile(img, (2, 98))
             img = np.clip(img, p_low, p_high)
 
@@ -131,8 +135,12 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = 255 - img
             
-        # Convert to color so OpenCV can standardize it
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        # --- NEW SAFETY NET: Only convert to Color if it is actually Grayscale ---
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif len(img.shape) == 3 and img.shape[2] == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        # If it's already 3 channels, it safely skips the conversion!
 
     else:
         # Standard PNG/JPG uploads
@@ -145,11 +153,13 @@ def preprocess_image(image_bytes, filename, expected_shape):
         raise ValueError("Could not read image data.")
 
     # Match AI Color Channels
-    if target_c == 1 and img.shape[2] == 3:
+    if target_c == 1 and len(img.shape) == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         img = np.expand_dims(img, axis=-1)
     elif target_c == 3 and len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    elif target_c == 1 and len(img.shape) == 2:
+        img = np.expand_dims(img, axis=-1)
 
     # Final resize & Normalization to [-1, 1]
     img = cv2.resize(img, (target_w, target_h))
