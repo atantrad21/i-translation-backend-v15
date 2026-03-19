@@ -122,14 +122,19 @@ def preprocess_image(image_bytes, filename, expected_shape):
             
         img = img.astype(np.uint8)
 
-       # --- 4. FIX INVERTED COLORS ---
+      # --- 4. FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = 255 - img
             
         # --- 5. ENHANCE CONTRAST (Mimic PNG output) ---
-        # Force the image strictly back to 8-bit so OpenCV doesn't crash!
         img = img.astype(np.uint8)
         
+        # 🚨 NEW SAFETY NET: If the DICOM is already in color (3 channels), flatten it to grayscale first!
+        if len(img.shape) == 3 and img.shape[2] in [3, 4]:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        elif len(img.shape) == 3 and img.shape[2] == 1:
+            img = np.squeeze(img, axis=-1)
+            
         # This guarantees the brain structures pop perfectly for the AI
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         img = clahe.apply(img)
