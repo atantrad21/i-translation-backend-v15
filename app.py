@@ -101,20 +101,23 @@ def preprocess_image(image_bytes, filename, expected_shape):
         elif len(img.shape) == 4:
             mid_index = img.shape[1] // 2
             img = img[0, mid_index]
-            
+
         # --- FORCE TO GRAYSCALE IF DICOM HAS COLOR CHANNELS ---
         if len(img.shape) == 3:
-            img = np.mean(img, axis=-1)  # Crush to 2D grayscale
+            img = np.mean(img, axis=-1)  
 
         # --- FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = np.max(img) - img
 
+        # --- THE FIX: SMART DICOM WINDOWING ---
+        # We must clip the extreme air/bone values so the tissue contrast matches your PNGs
+        p_low, p_high = np.percentile(img, (1, 99))
+        img = np.clip(img, p_low, p_high)
+
         # --- STANDARD LINEAR NORMALIZATION ---
-        img_min = np.min(img)
-        img_max = np.max(img)
-        if img_max - img_min > 0:
-            img = (img - img_min) / (img_max - img_min) * 255.0
+        if p_high - p_low > 0:
+            img = (img - p_low) / (p_high - p_low) * 255.0
         else:
             img = np.zeros_like(img)
         
@@ -123,23 +126,18 @@ def preprocess_image(image_bytes, filename, expected_shape):
     else:
         # --- HANDLE STANDARD PNG/JPG STRICLY AS GRAYSCALE ---
         np_img = np.frombuffer(image_bytes, np.uint8)
-        # IMREAD_GRAYSCALE guarantees a 2D array, completely bypassing RGB
         img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError("Could not read image data.")
 
     # --- 2. HIGH-QUALITY RESIZE ---
-    # OpenCV resizes the purely 2D array to (target_w, target_h)
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     # --- 3. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
     img = (img.astype(np.float32) / 127.5) - 1.0
-    
-    # Strictly enforce (1, H, W, 1) - No more 12288 dimension mismatches
     img = img.reshape((1, target_h, target_w, 1))
     
     return img
-
 
 def postprocess_tensor(tensor):
     if hasattr(tensor, 'numpy'):
