@@ -1,8 +1,11 @@
 import os
 import io
 import base64
+import datetime
 import gdown
 import pydicom
+from pydicom.dataset import FileDataset, FileMetaDataset
+import pydicom.uid
 import tensorflow as tf
 import numpy as np
 import cv2
@@ -136,47 +139,75 @@ def preprocess_image(image_bytes, filename, expected_shape):
 
 
 # ==========================================
-# === SMART UPSCALER (BAND-AID SUPER RESOLUTION) ===
+# === POST-PROCESSING & FILE GENERATION ===
 # ==========================================
-def postprocess_tensor(tensor):
+def get_sharpened_grayscale(tensor):
+    """Takes the raw AI tensor and applies the Band-Aid upscaling to a crisp 512x512."""
     if hasattr(tensor, 'numpy'):
         img = tensor[0].numpy()
     else:
         img = tensor[0]
         
-    # --- 1. DENORMALIZE FROM AI TENSOR ---
+    # Denormalize
     img = (img + 1.0) * 127.5
     img = np.clip(img, 0, 255).astype(np.uint8)
 
-    # Convert strictly to 2D Grayscale array
+    # Force Grayscale
     if len(img.shape) == 3 and img.shape[2] == 1:
         img = np.squeeze(img, axis=-1)
     elif len(img.shape) == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # --- 2. HIGH-FIDELITY UPSCALING ---
-    # Lanczos4 is mathematically far superior to Cubic when stretching tiny 64x64 images
+    # Upscale and Sharpen
     img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LANCZOS4)
-
-    # --- 3. UNSHARP MASKING (Fakes Super-Resolution) ---
-    # This specifically detects blurry edges and artificially sharpens them
     gaussian_blur = cv2.GaussianBlur(img, (0, 0), 2.0)
     img = cv2.addWeighted(img, 1.5, gaussian_blur, -0.5, 0)
-
-    # --- 4. GAN ARTIFACT REDUCTION ---
-    # Smooths out the tiny "checkerboard" static left behind by the CycleGAN
     img = cv2.bilateralFilter(img, d=5, sigmaColor=25, sigmaSpace=25)
+    return img
 
-    # Convert back to BGR so the web browser can read the colors properly
-    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-
-    _, buffer = cv2.imencode('.png', img)
+def convert_to_png_base64(gray_img):
+    """Converts the grayscale array to a PNG for the website UI."""
+    bgr_img = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2BGR)
+    _, buffer = cv2.imencode('.png', bgr_img)
     return base64.b64encode(buffer).decode('utf-8')
 
+def convert_to_dicom_base64(gray_img, modality):
+    """Packages the grayscale array into a strict, valid DICOM file."""
+    file_meta = FileMetaDataset()
+    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2') # CT/MRI Storage
+    file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+    file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
-# ==========================================
-# FLASK ROUTING
-# ==========================================
+    ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+    
+    # Inject standard medical metadata
+    ds.PatientName = "AI^Generated^Patient"
+    ds.PatientID = "ITRANS-V16"
+    ds.Modality = modality.upper()
+    ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
+    ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
+    ds.StudyInstanceUID = pydicom.uid.generate_uid()
+    ds.SeriesInstanceUID = pydicom.uid.generate_uid()
+    ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+    ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+    ds.SecondaryCaptureDeviceManufacturer = "I-Translation AI"
+
+    # Image specs (8-bit grayscale)
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.PixelRepresentation = 0
+    ds.HighBit = 7
+    ds.BitsStored = 8
+    ds.BitsAllocated = 8
+    ds.Rows, ds.Columns = gray_img.shape
+    ds.PixelData = gray_img.tobytes()
+
+    # Save to memory and encode
+    with io.BytesIO() as buffer:
+        ds.save_as(buffer, write_like_original=False)
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+
 # ==========================================
 # FLASK ROUTING
 # ==========================================
@@ -195,9 +226,19 @@ def convert():
         expected_shape = model.input_shape
         input_tensor = preprocess_image(file.read(), file.filename.lower(), expected_shape)
 
+        # Get the AI translation
         result_tensor = model(input_tensor, training=False)
 
-        return jsonify({f'image_{model_key}': postprocess_tensor(result_tensor)})
+        # Process the image once
+        sharpened_image = get_sharpened_grayscale(result_tensor)
+        
+        # Generate both file formats!
+        modality_string = "MR" if model_key == 'G' else "CT"
+        
+        return jsonify({
+            f'image_{model_key}': convert_to_png_base64(sharpened_image),
+            f'dicom_{model_key}': convert_to_dicom_base64(sharpened_image, modality_string)
+        })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
