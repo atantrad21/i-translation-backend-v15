@@ -140,7 +140,12 @@ def preprocess_image(image_bytes, filename, expected_shape):
     return img
 
 def postprocess_tensor(tensor):
-    img = tensor[0].numpy()
+    # Safely extract the image whether it is an AI Tensor or a raw NumPy array!
+    if hasattr(tensor, 'numpy'):
+        img = tensor[0].numpy()
+    else:
+        img = tensor[0]
+        
     img = (img + 1.0) * 127.5 
     img = np.clip(img, 0, 255).astype(np.uint8)
     
@@ -154,7 +159,6 @@ def postprocess_tensor(tensor):
         
     _, buffer = cv2.imencode('.png', img)
     return base64.b64encode(buffer).decode('utf-8')
-
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'image' not in request.files:
