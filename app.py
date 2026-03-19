@@ -1,12 +1,13 @@
 import os
+import io
 import base64
 import gdown
+import pydicom
 import tensorflow as tf
 import numpy as np
 import cv2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -77,24 +78,33 @@ def load_models():
 
 load_models()
 
-def preprocess_image(image_bytes):
-    # 1. Read the image
-    np_img = np.frombuffer(image_bytes, np.uint8)
-    
-    # 2. Decode exactly as Grayscale (1 channel) instead of Color
-    img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
-    
-    # 3. Resize to exactly what the AI expects (64x64)
+def preprocess_image(image_bytes, filename):
+    if filename.endswith('.dcm'):
+        # 1a. Read the DICOM file directly from bytes
+        dicom = pydicom.dcmread(io.BytesIO(image_bytes))
+        img = dicom.pixel_array
+        
+        # DICOM files have intense 16-bit brightness. Normalize down to standard 8-bit.
+        img = img - np.min(img)
+        if np.max(img) != 0:
+            img = (img / np.max(img) * 255.0).astype(np.uint8)
+        else:
+            img = img.astype(np.uint8)
+    else:
+        # 1b. Read standard PNG/JPG files
+        np_img = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
+        
+    # 2. Resize to exactly what the AI expects (64x64)
     img = cv2.resize(img, (64, 64))
     
-    # 4. Normalize pixel values to [-1, 1]
+    # 3. Normalize pixel values to [-1, 1]
     img = (img / 127.5) - 1.0 
     
-    # 5. Add the channel dimension (64, 64, 1) and batch dimension (1, 64, 64, 1)
+    # 4. Add the channel and batch dimensions: (1, 64, 64, 1)
     img = np.expand_dims(img, axis=-1) 
     img = np.expand_dims(img, axis=0)  
     return img
-
 def postprocess_tensor(tensor):
     # 1. Extract the image from the AI's output batch (now 64x64x1)
     img = tensor[0].numpy()
@@ -126,7 +136,9 @@ def convert():
     file = request.files['image']
     
     try:
-        input_tensor = preprocess_image(file.read())
+       try:
+        # Pass both the file bytes and the filename so it knows if it's a DICOM!
+        input_tensor = preprocess_image(file.read(), file.filename.lower())
         
         # Route perfectly to the winning models
         if conversion_type == 'ct_to_mri':
