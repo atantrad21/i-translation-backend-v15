@@ -2,8 +2,6 @@ import os
 import io
 import base64
 import datetime
-import zipfile
-import glob
 import gdown
 import pydicom
 from pydicom.dataset import FileDataset, FileMetaDataset
@@ -55,59 +53,32 @@ class InstanceNormalization(tf.keras.layers.Layer):
 
 
 # ==========================================
-# HIGH-RES 990 EPOCH CHAMPION MODELS (ZIP)
+# HIGH-RES STABLE CHAMPION MODELS
 # ==========================================
-ZIP_FILE_ID = '113RSDAYjY-dNw9D9bd1tiRAGkzzDO8HL'
+MODEL_LINKS = {
+    'F': '122c7rLxQlfs8KjWxtlbovtK0KgRvcTal',  # MRI to CT Champion
+    'G': '1CIG0NQO8pfUxyahaU0mBzKm_jRzMPcKA'   # CT to MRI Champion
+}
 generators = {}
 
 def load_models():
     print("======================================================================")
-    print("LOADING 990-EPOCH GENERATORS (F & G) FROM ZIP")
+    print("LOADING STABLE HIGH-RES GENERATORS (F & G)")
     print("======================================================================")
-    
-    zip_path = "/tmp/models.zip"
-    extract_dir = "/tmp/extracted_models"
-    
-    # 1. Download and Extract if we haven't already
-    if not os.path.exists(extract_dir):
-        os.makedirs(extract_dir, exist_ok=True)
-        print("Downloading massive ZIP file... (This may take a minute)")
-        # Using id= bypasses the Google Drive virus warning!
-        gdown.download(id=ZIP_FILE_ID, output=zip_path, quiet=False)
-        
-        print("Extracting ZIP file...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
-        print("Extraction complete!")
+    for name, file_id in MODEL_LINKS.items():
+        model_path = f"/tmp/generator_stable_{name.lower()}.h5"
+        if not os.path.exists(model_path):
+            print(f"Downloading Generator {name}...")
+            # Using id= bypasses the Google Drive virus warning!
+            gdown.download(id=file_id, output=model_path, quiet=False)
 
-    # 2. Find the F and G models inside the extracted folder
-    model_paths = glob.glob(f"{extract_dir}/**/*.h5", recursive=True)
-    
-    path_F = None
-    path_G = None
-    
-    for path in model_paths:
-        filename = os.path.basename(path).lower()
-        if 'f' in filename:
-            path_F = path
-        elif 'g' in filename:
-            path_G = path
-
-    if not path_F or not path_G:
-        raise ValueError(f"Could not find both F and G models in the ZIP! Found: {model_paths}")
-
-    # 3. Load them into memory
-    print(f"Loading Generator F from: {path_F}")
-    generators['F'] = tf.keras.models.load_model(
-        path_F, compile=False, custom_objects={'InstanceNormalization': InstanceNormalization}
-    )
-    print("✓ Generator F LOADED!")
-
-    print(f"Loading Generator G from: {path_G}")
-    generators['G'] = tf.keras.models.load_model(
-        path_G, compile=False, custom_objects={'InstanceNormalization': InstanceNormalization}
-    )
-    print("✓ Generator G LOADED!")
+        print(f"Loading Generator {name} into memory...")
+        generators[name] = tf.keras.models.load_model(
+            model_path,
+            compile=False,
+            custom_objects={'InstanceNormalization': InstanceNormalization}
+        )
+        print(f"✓ Generator {name} LOADED!")
 
 load_models()
 
@@ -203,7 +174,7 @@ def convert_to_dicom_base64(gray_img, modality):
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
     
     ds.PatientName = "AI^Generated^Patient"
-    ds.PatientID = "ITRANS-990-EPOCH"
+    ds.PatientID = "ITRANS-STABLE-EPOCH"
     ds.Modality = modality.upper()
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
     ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
