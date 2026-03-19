@@ -89,7 +89,7 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_w = target_shape[2] or 256
     target_c = target_shape[3] or 3
 
-   if filename.endswith('.dcm'):
+    if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         # 1. Read as a 32-bit float to completely avoid integer underflow
         img = dicom.pixel_array.astype(np.float32)
@@ -112,49 +112,6 @@ def preprocess_image(image_bytes, filename, expected_shape):
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
         elif len(img.shape) == 3 and img.shape[2] == 1:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
-        # 1. CT Scan Rescale (Hounsfield Units)
-        intercept = getattr(dicom, 'RescaleIntercept', 0)
-        slope = getattr(dicom, 'RescaleSlope', 1)
-        img = img * float(slope) + float(intercept)
-
-        # 2. Extract Radiologist Windowing
-        window_center = getattr(dicom, 'WindowCenter', None)
-        window_width = getattr(dicom, 'WindowWidth', None)
-
-        if window_center is not None and window_width is not None:
-            if type(window_center) == pydicom.multival.MultiValue:
-                window_center = window_center[0]
-            if type(window_width) == pydicom.multival.MultiValue:
-                window_width = window_width[0]
-
-            img_min = float(window_center) - float(window_width) / 2.0
-            img_max = float(window_center) + float(window_width) / 2.0
-            img = np.clip(img, img_min, img_max)
-        else:
-            p_low, p_high = np.percentile(img, (2, 98))
-            img = np.clip(img, p_low, p_high)
-
-        # 3. Normalize perfectly to 0-255
-        img_min = np.min(img)
-        img_max = np.max(img)
-        if img_max - img_min > 0:
-            img = (img - img_min) / (img_max - img_min) * 255.0
-        else:
-            img = np.zeros_like(img)
-            
-        img = img.astype(np.uint8)
-
-        # 4. Fix Inverted Colors
-        if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
-            img = 255 - img
-            
-        # --- NEW SAFETY NET: Only convert to Color if it is actually Grayscale ---
-        if len(img.shape) == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif len(img.shape) == 3 and img.shape[2] == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        # If it's already 3 channels, it safely skips the conversion!
 
     else:
         # Standard PNG/JPG uploads
