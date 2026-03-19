@@ -79,17 +79,16 @@ def load_models():
 load_models()
 
 
-# === THE SMART IMAGE PROCESSOR ===
+# === STRICT 1-CHANNEL GRAYSCALE PROCESSOR ===
 def preprocess_image(image_bytes, filename, expected_shape):
-    # 1. SAFELY EXTRACT SHAPE (Force standard Python integers to prevent OpenCV C++ errors)
+    # 1. EXTRACT SHAPE (Fallback to 64x64 if model doesn't specify)
     if isinstance(expected_shape, list):
         target_shape = expected_shape[0]
     else:
         target_shape = expected_shape
         
-    target_h = int(target_shape[1]) if target_shape[1] is not None else 256
-    target_w = int(target_shape[2]) if target_shape[2] is not None else 256
-    target_c = int(target_shape[3]) if target_shape[3] is not None else 3
+    target_h = int(target_shape[1]) if target_shape[1] is not None else 64
+    target_w = int(target_shape[2]) if target_shape[2] is not None else 64
 
     if filename.endswith('.dcm'):
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
@@ -102,12 +101,16 @@ def preprocess_image(image_bytes, filename, expected_shape):
         elif len(img.shape) == 4:
             mid_index = img.shape[1] // 2
             img = img[0, mid_index]
+            
+        # --- FORCE TO GRAYSCALE IF DICOM HAS COLOR CHANNELS ---
+        if len(img.shape) == 3:
+            img = np.mean(img, axis=-1)  # Crush to 2D grayscale
 
         # --- FIX INVERTED COLORS ---
         if getattr(dicom, 'PhotometricInterpretation', '') == 'MONOCHROME1':
             img = np.max(img) - img
 
-        # --- STANDARD LINEAR NORMALIZATION (GAN-Safe) ---
+        # --- STANDARD LINEAR NORMALIZATION ---
         img_min = np.min(img)
         img_max = np.max(img)
         if img_max - img_min > 0:
@@ -117,37 +120,23 @@ def preprocess_image(image_bytes, filename, expected_shape):
         
         img = img.astype(np.uint8)
 
-        # Match AI Color Channels (Keep as 2D for now if Grayscale)
-        if target_c == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
     else:
-        # --- HANDLE STANDARD PNG/JPG UPLOADS ---
+        # --- HANDLE STANDARD PNG/JPG STRICLY AS GRAYSCALE ---
         np_img = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        # IMREAD_GRAYSCALE guarantees a 2D array, completely bypassing RGB
+        img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError("Could not read image data.")
-        
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Match AI Color Channels (Keep as 2D for now if Grayscale)
-        if target_c == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     # --- 2. HIGH-QUALITY RESIZE ---
-    # OpenCV safely resizes the pure (H,W) or (H,W,3) array here without crashing
+    # OpenCV resizes the purely 2D array to (target_w, target_h)
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    
-    # --- 3. EXPAND DIMS & NORMALIZE TO [-1, 1] ---
-    # Now we safely add the channel dimension back if the model expects 1 channel
-    if target_c == 1 and len(img.shape) == 2:
-        img = np.expand_dims(img, axis=-1)
 
-    # Scale strictly to [-1.0, 1.0]
+    # --- 3. NORMALIZE TO [-1, 1] & FORCE SHAPE ---
     img = (img.astype(np.float32) / 127.5) - 1.0
     
-    # Add the batch dimension: (1, H, W, C)
-    img = img.reshape((1, target_h, target_w, target_c))
+    # Strictly enforce (1, H, W, 1) - No more 12288 dimension mismatches
+    img = img.reshape((1, target_h, target_w, 1))
     
     return img
 
