@@ -8,6 +8,7 @@ import numpy as np
 import cv2
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -68,7 +69,6 @@ def load_models():
             gdown.download(url, model_path, quiet=False)
         
         print(f"Loading Generator {name} into memory...")
-        # We pass the custom layer into the loader here!
         generators[name] = tf.keras.models.load_model(
             model_path, 
             compile=False, 
@@ -105,6 +105,7 @@ def preprocess_image(image_bytes, filename):
     img = np.expand_dims(img, axis=-1) 
     img = np.expand_dims(img, axis=0)  
     return img
+
 def postprocess_tensor(tensor):
     # 1. Extract the image from the AI's output batch (now 64x64x1)
     img = tensor[0].numpy()
@@ -136,8 +137,6 @@ def convert():
     file = request.files['image']
     
     try:
-       try:
-        # Pass both the file bytes and the filename so it knows if it's a DICOM!
         input_tensor = preprocess_image(file.read(), file.filename.lower())
         
         # Route perfectly to the winning models
