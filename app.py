@@ -91,6 +91,8 @@ def preprocess_image(image_bytes, filename, expected_shape):
     target_w = 256
 
     if filename.endswith('.dcm'):
+        # WE ARE ALREADY DOING WHAT YOU SUGGESTED HERE!
+        # Simulating a PNG conversion before the AI sees it
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
@@ -155,53 +157,55 @@ def convert_to_png_base64(gray_img):
     return base64.b64encode(buffer).decode('utf-8')
 
 def convert_to_dicom_base64(gray_img, modality):
-    # 1. Use the exact array that makes the "awesome" PNG file
-    img_array = np.array(gray_img, dtype=np.uint8)
+    # 1. Take the awesome PNG-style image
+    img_array = np.array(gray_img, dtype=np.float32)
+
+    # 2. UPGRADE TO 16-BIT (This stops the squished ghosting!)
+    # We mathematically stretch the 0-255 pixels to 0-65535
+    img_array = (img_array / 255.0) * 65535.0
+    
+    # Force strictly into Little-Endian 16-bit so viewers read the bytes perfectly
+    img_array = np.round(img_array).astype('<u2')
 
     file_meta = FileMetaDataset()
     
-    # 2. CRITICAL FIX: SECONDARY CAPTURE (SC) SOP CLASS
-    # This stops the medical viewer from applying "raw CT" assumptions to an 8-bit AI image!
-    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.7') 
+    if modality.upper() == "CT":
+        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2')
+    else:
+        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.4')
+        
     file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
     
     ds.PatientName = "AI^Generated"
-    ds.PatientID = "ITRANS-8BIT-SC"
+    ds.PatientID = "ITRANS-16BIT"
     ds.Modality = modality.upper()
-    ds.ConversionType = "WSD" # Workstation Generated (Required for SC)
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
     ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
     ds.StudyInstanceUID = pydicom.uid.generate_uid()
     ds.SeriesInstanceUID = pydicom.uid.generate_uid()
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
     ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
-    ds.SecondaryCaptureDeviceManufacturer = "I-Translation AI"
 
-    # 3. Match the 8-bit PNG settings perfectly
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.PixelRepresentation = 0
-    ds.BitsAllocated = 8
-    ds.BitsStored = 8
-    ds.HighBit = 7
     
-    # Force default windowing so it's not dark on load
-    ds.WindowCenter = "128"
-    ds.WindowWidth = "256"
+    # --- 16-BIT METADATA MATCH ---
+    ds.BitsAllocated = 16
+    ds.BitsStored = 16
+    ds.HighBit = 15
+    
+    # Tell the viewer exactly how bright it should be
+    ds.WindowCenter = "32768"
+    ds.WindowWidth = "65535"
     ds.RescaleIntercept = "0"
     ds.RescaleSlope = "1"
-
-    ds.Rows, ds.Columns = img_array.shape
     
-    # Make absolutely sure the byte length is even (DICOM strict rule)
-    pixel_bytes = img_array.tobytes()
-    if len(pixel_bytes) % 2 != 0:
-        pixel_bytes += b'\x00'
-        
-    ds.PixelData = pixel_bytes
+    ds.Rows, ds.Columns = img_array.shape
+    ds.PixelData = img_array.tobytes()
 
     ds.is_little_endian = True
     ds.is_implicit_VR = False
