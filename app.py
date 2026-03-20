@@ -155,50 +155,53 @@ def convert_to_png_base64(gray_img):
     return base64.b64encode(buffer).decode('utf-8')
 
 def convert_to_dicom_base64(gray_img, modality):
-    # 1. Start with the perfect 512x512 image from our postprocessor
-    img_array = np.array(gray_img, dtype=np.float32)
-
-    # 2. Scale up to 16-bit brightness (0 to 65535)
-    img_array = (img_array / 255.0) * 65535.0
-    
-    # 3. CRITICAL: Force strictly into Little-Endian 16-bit so viewers read the bytes perfectly
-    img_array = img_array.astype('<u2')
+    # 1. Use the exact array that makes the "awesome" PNG file
+    img_array = np.array(gray_img, dtype=np.uint8)
 
     file_meta = FileMetaDataset()
-    # 4. Use Secondary Capture (SC) format. This stops viewers from applying raw scanner rules.
-    file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.7' 
+    
+    # 2. CRITICAL FIX: SECONDARY CAPTURE (SC) SOP CLASS
+    # This stops the medical viewer from applying "raw CT" assumptions to an 8-bit AI image!
+    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.7') 
     file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
     
     ds.PatientName = "AI^Generated"
-    ds.PatientID = "ITRANS-16BIT"
+    ds.PatientID = "ITRANS-8BIT-SC"
     ds.Modality = modality.upper()
+    ds.ConversionType = "WSD" # Workstation Generated (Required for SC)
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
     ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
     ds.StudyInstanceUID = pydicom.uid.generate_uid()
     ds.SeriesInstanceUID = pydicom.uid.generate_uid()
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-    ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.7' # Secondary Capture
+    ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+    ds.SecondaryCaptureDeviceManufacturer = "I-Translation AI"
 
+    # 3. Match the 8-bit PNG settings perfectly
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.PixelRepresentation = 0
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
     
-    # --- 16-BIT METADATA MATCH ---
-    ds.BitsAllocated = 16
-    ds.BitsStored = 16
-    ds.HighBit = 15
-    
-    # Define how the viewer should calculate the brightness window
-    ds.WindowCenter = 32768
-    ds.WindowWidth = 65535
+    # Force default windowing so it's not dark on load
+    ds.WindowCenter = "128"
+    ds.WindowWidth = "256"
     ds.RescaleIntercept = "0"
     ds.RescaleSlope = "1"
-    
+
     ds.Rows, ds.Columns = img_array.shape
-    ds.PixelData = img_array.tobytes()
+    
+    # Make absolutely sure the byte length is even (DICOM strict rule)
+    pixel_bytes = img_array.tobytes()
+    if len(pixel_bytes) % 2 != 0:
+        pixel_bytes += b'\x00'
+        
+    ds.PixelData = pixel_bytes
 
     ds.is_little_endian = True
     ds.is_implicit_VR = False
