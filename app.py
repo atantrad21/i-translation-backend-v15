@@ -156,7 +156,7 @@ def postprocess_tensor(tensor):
     elif len(img.shape) == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Soft resize to 512x512 strictly for UI viewing consistency (No more fake sharpening!)
+    # Soft resize to 512x512 strictly for UI viewing consistency
     img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
     
     return img
@@ -167,26 +167,40 @@ def convert_to_png_base64(gray_img):
     return base64.b64encode(buffer).decode('utf-8')
 
 def convert_to_dicom_base64(gray_img, modality):
-    # 1. Convert whatever the AI spit out into a rigid Numpy array
-    img_array = np.array(gray_img)
+    import numpy as np
+    import cv2
+    import io
+    import base64
+    import datetime
+    import pydicom
+    from pydicom.dataset import FileDataset, FileMetaDataset
+    
+    # 1. Ensure array is safely float32 before scaling
+    img_array = np.array(gray_img, dtype=np.float32)
 
     # 2. Resize to Standard Medical Resolution (512x512)
-    # This prevents the "black box" by stretching the AI output to fit a standard viewer canvas
     if img_array.shape != (512, 512):
         img_array = cv2.resize(img_array, (512, 512), interpolation=cv2.INTER_CUBIC)
 
-    # 3. Normalize the contrast mathematically (forces values safely between 0 and 255)
+    # 3. MEDICAL 16-BIT CONVERSION (The Fix for Ghosting)
+    # Maps the pixels to standard CT/MR 16-bit depth (0 to 65535)
     img_min = img_array.min()
     img_max = img_array.max()
     if img_max > img_min:
-        img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+        img_array = (img_array - img_min) / (img_max - img_min) * 65535.0
     
-    # 4. CRITICAL FIX: Cast to 8-bit unsigned integer to match 'BitsAllocated = 8'
-    img_array = img_array.astype(np.uint8)
+    # Force the mathematical type to unsigned 16-bit integer
+    img_array = img_array.astype(np.uint16)
 
     # --- Start standard DICOM metadata generation ---
     file_meta = FileMetaDataset()
-    file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2') 
+    
+    # Strictly define CT vs MR SOP Class UIDs so viewers don't get confused
+    if modality.upper() == "CT":
+        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2')
+    else:
+        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.4')
+        
     file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
@@ -206,14 +220,23 @@ def convert_to_dicom_base64(gray_img, modality):
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.PixelRepresentation = 0
-    ds.HighBit = 7
-    ds.BitsStored = 8
-    ds.BitsAllocated = 8
+    
+    # --- THE 16-BIT METADATA FIX ---
+    ds.HighBit = 15
+    ds.BitsStored = 16
+    ds.BitsAllocated = 16
+    
+    # --- DEFAULT CONTRAST FIX ---
+    # Prevents the screen from rendering pure black on load
+    ds.WindowCenter = 32768
+    ds.WindowWidth = 65535
+    ds.RescaleIntercept = "0"
+    ds.RescaleSlope = "1"
     
     # Use the exact dimensions of our safely resized array (512x512)
     ds.Rows, ds.Columns = img_array.shape
     
-    # Pack the clean 8-bit image data into the DICOM structure
+    # Pack the clean 16-bit image data into the DICOM structure
     ds.PixelData = img_array.tobytes()
 
     # --- Base64 Conversion for Frontend Download ---
