@@ -60,7 +60,7 @@ MODEL_LINKS = {
     'G': '1ES0HKNRX6eQ-Qz11qaB_KQpeZDJmdkSM'   # FRESH CT to MRI @ 250 Epochs
 }
 
-generators = {} # <--- Keep this safe!
+generators = {} 
 
 def load_models():
     print("======================================================================")
@@ -70,7 +70,6 @@ def load_models():
         model_path = f"/tmp/generator_stable_{name.lower()}.h5"
         if not os.path.exists(model_path):
             print(f"Downloading Generator {name}...")
-            # Using id= bypasses the Google Drive virus warning!
             gdown.download(id=file_id, output=model_path, quiet=False)
 
         print(f"Loading Generator {name} into memory...")
@@ -88,12 +87,10 @@ load_models()
 # === TRUE HIGH-DEFINITION TRANSLATOR ===
 # ==========================================
 def preprocess_image(image_bytes, filename, expected_shape):
-    # 1. OBEY THE NEW HIGH-RES SHAPE (256x256)
     target_h = 256
     target_w = 256
 
     if filename.endswith('.dcm'):
-        # --- THE PNG SIMULATION ---
         dicom = pydicom.dcmread(io.BytesIO(image_bytes))
         img = dicom.pixel_array.astype(np.float32)
 
@@ -105,7 +102,6 @@ def preprocess_image(image_bytes, filename, expected_shape):
         if len(img.shape) == 3:
             img = np.mean(img, axis=-1)
 
-        # --- PERCENTILE CLIPPING FIX ---
         p_low, p_high = np.percentile(img, (1.0, 99.0))
         img = np.clip(img, p_low, p_high)
 
@@ -120,16 +116,13 @@ def preprocess_image(image_bytes, filename, expected_shape):
         img = cv2.imdecode(encoded_png, cv2.IMREAD_GRAYSCALE)
 
     else:
-        # --- REGULAR PNG/JPG UPLOADS ---
         np_img = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_img, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError("Could not read image data.")
 
-    # --- 2. RESIZE TO 256x256 ---
     img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-    # --- 3. NORMALIZE TO [-1, 1] & FORMAT FOR KERAS ---
     img = (img.astype(np.float32) / 127.5) - 1.0
     img = img.reshape((1, target_h, target_w, 1))
     
@@ -140,25 +133,20 @@ def preprocess_image(image_bytes, filename, expected_shape):
 # === POST-PROCESSING & FILE GENERATION ===
 # ==========================================
 def postprocess_tensor(tensor):
-    """Cleanly processes the true 256x256 AI output without artificial blurring."""
     if hasattr(tensor, 'numpy'):
         img = tensor[0].numpy()
     else:
         img = tensor[0]
         
-    # Denormalize
     img = (img + 1.0) * 127.5
     img = np.clip(img, 0, 255).astype(np.uint8)
 
-    # Force Grayscale
     if len(img.shape) == 3 and img.shape[2] == 1:
         img = np.squeeze(img, axis=-1)
     elif len(img.shape) == 3 and img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Soft resize to 512x512 strictly for UI viewing consistency
     img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_CUBIC)
-    
     return img
 
 def convert_to_png_base64(gray_img):
@@ -167,79 +155,51 @@ def convert_to_png_base64(gray_img):
     return base64.b64encode(buffer).decode('utf-8')
 
 def convert_to_dicom_base64(gray_img, modality):
-    import numpy as np
-    import cv2
-    import io
-    import base64
-    import datetime
-    import pydicom
-    from pydicom.dataset import FileDataset, FileMetaDataset
-    
-    # 1. Ensure array is safely float32 before scaling
+    # 1. Start with the perfect 512x512 image from our postprocessor
     img_array = np.array(gray_img, dtype=np.float32)
 
-    # 2. Resize to Standard Medical Resolution (512x512)
-    if img_array.shape != (512, 512):
-        img_array = cv2.resize(img_array, (512, 512), interpolation=cv2.INTER_CUBIC)
-
-    # 3. MEDICAL 16-BIT CONVERSION (The Fix for Ghosting)
-    # Maps the pixels to standard CT/MR 16-bit depth (0 to 65535)
-    img_min = img_array.min()
-    img_max = img_array.max()
-    if img_max > img_min:
-        img_array = (img_array - img_min) / (img_max - img_min) * 65535.0
+    # 2. Scale up to 16-bit brightness (0 to 65535)
+    img_array = (img_array / 255.0) * 65535.0
     
-    # Force the mathematical type to unsigned 16-bit integer
-    img_array = img_array.astype(np.uint16)
+    # 3. CRITICAL: Force strictly into Little-Endian 16-bit so viewers read the bytes perfectly
+    img_array = img_array.astype('<u2')
 
-    # --- Start standard DICOM metadata generation ---
     file_meta = FileMetaDataset()
-    
-    # Strictly define CT vs MR SOP Class UIDs so viewers don't get confused
-    if modality.upper() == "CT":
-        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.2')
-    else:
-        file_meta.MediaStorageSOPClassUID = pydicom.uid.UID('1.2.840.10008.5.1.4.1.1.4')
-        
+    # 4. Use Secondary Capture (SC) format. This stops viewers from applying raw scanner rules.
+    file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.7' 
     file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
     
-    ds.PatientName = "AI^Generated^Patient"
-    ds.PatientID = "ITRANS-STABLE-EPOCH"
+    ds.PatientName = "AI^Generated"
+    ds.PatientID = "ITRANS-16BIT"
     ds.Modality = modality.upper()
     ds.StudyDate = datetime.datetime.now().strftime('%Y%m%d')
     ds.StudyTime = datetime.datetime.now().strftime('%H%M%S')
     ds.StudyInstanceUID = pydicom.uid.generate_uid()
     ds.SeriesInstanceUID = pydicom.uid.generate_uid()
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-    ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
-    ds.SecondaryCaptureDeviceManufacturer = "I-Translation AI"
+    ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.7' # Secondary Capture
 
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.PixelRepresentation = 0
     
-    # --- THE 16-BIT METADATA FIX ---
-    ds.HighBit = 15
-    ds.BitsStored = 16
+    # --- 16-BIT METADATA MATCH ---
     ds.BitsAllocated = 16
+    ds.BitsStored = 16
+    ds.HighBit = 15
     
-    # --- DEFAULT CONTRAST FIX ---
-    # Prevents the screen from rendering pure black on load
+    # Define how the viewer should calculate the brightness window
     ds.WindowCenter = 32768
     ds.WindowWidth = 65535
     ds.RescaleIntercept = "0"
     ds.RescaleSlope = "1"
     
-    # Use the exact dimensions of our safely resized array (512x512)
     ds.Rows, ds.Columns = img_array.shape
-    
-    # Pack the clean 16-bit image data into the DICOM structure
     ds.PixelData = img_array.tobytes()
 
-    # --- Base64 Conversion for Frontend Download ---
     ds.is_little_endian = True
     ds.is_implicit_VR = False
 
